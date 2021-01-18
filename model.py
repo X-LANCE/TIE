@@ -1,5 +1,7 @@
 #!/usr/bin/python
 # -*- coding: utf-8 -*-
+from copy import deepcopy
+
 import torch
 import torch.nn as nn
 from transformers.modeling_bert import BertEncoder, BertPreTrainedModel
@@ -151,12 +153,12 @@ class Link(nn.Module):
         if self.method != 'init_child':
             return None
         assert gat_mask.dim() == 3
-        child = gat_mask.copy()
+        child = deepcopy(gat_mask)
         l = gat_mask.size(1)
         for i in range(l):
             c = child[:, i]
             for j in range(i + 1, l):
-                temp = child[:, j].copy()
+                temp = deepcopy(child[:, j])
                 temp[:, j] = 0
                 temp = c[:, j].unsqueeze(dim=1) * temp
                 c = ((c - temp) > 0).to(child.dtype)
