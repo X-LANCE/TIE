@@ -572,7 +572,9 @@ def main():
                         help='the folder of the checkpoint is provided')
     parser.add_argument('--separate_read', action='store_true')
     parser.add_argument('--resave', action='store_true')
-    parser.add_argument('--evaluate_split', default='dev', choices=['dev', 'test'])
+    parser.add_argument('--evaluate_split', type=str, default='dev', choices=['dev', 'test'])
+    parser.add_argument('--max_depth_embeddings', type=str, default=None,
+                        help='Set to the max depth embedding for node if want to use the position embeddings')
     args = parser.parse_args()
 
     if os.path.exists(args.output_dir) and os.listdir(

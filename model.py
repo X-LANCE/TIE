@@ -111,12 +111,17 @@ class GraphHtmlConfig(PretrainedConfig):
         self.method = args.method
         self.model_type = args.model_type
         self.num_hidden_layers = args.num_node_block
+        self.max_depth_embeddings = args.max_depth_embeddings
 
 
 class Link(nn.Module):
-    def __init__(self, method='base'):
+    def __init__(self, method, config):
         super().__init__()
         self.method = method
+        self.add_position_embeddings = True if config.max_depth_embeddings is not None else False
+        if self.add_position_embeddings:
+            self.sequential_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
+            self.depth_embeddings = nn.Embedding(config.max_depth_embeddings, config.hidden_size)
 
     def forward(self, inputs, tag_to_token, gat_mask):
         assert tag_to_token.dim() == 3
@@ -126,6 +131,8 @@ class Link(nn.Module):
         if modified_gat_mask is not None:
             for i in range(outputs.size(1) - 1, -1, -1):
                 outputs[:, i] = torch.matmul(modified_gat_mask[:, i].unsqueeze(dim=1), outputs).squeeze(dim=1)
+        if self.add_position_embeddings:
+            ...  # TODO position embedding adding
         return outputs
 
     def deduce_direct_string(self, tag_to_token):
@@ -171,7 +178,7 @@ class GraphHtmlBert(BertPreTrainedModel):
             self.ptm = PTMForQA.electra
         else:
             raise NotImplementedError()
-        self.link = Link(self.method)
+        self.link = Link(self.method, config)
         self.num_gat_layers = config.num_hidden_layers
         self.gat = BertEncoder(config)
         self.qa_outputs = PTMForQA.qa_outputs
