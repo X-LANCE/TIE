@@ -144,13 +144,17 @@ class Link(nn.Module):
         if self.method != 'init_child':
             return None
         assert gat_mask.dim() == 3
-        child = torch.zeros_like(gat_mask)
+        child = gat_mask.copy()
         l = gat_mask.size(1)
         for i in range(l):
-            child[:, i] = gat_mask[:, i]
+            c = child[:, i]
             for j in range(i + 1, l):
-                temp = child[:, j].unsqueeze(dim=1) * gat_mask[:, j]
-                child = ((child - temp) > 0).to(child.dtype)
+                temp = child[:, j].copy()
+                temp[:, j] = 0
+                temp = c[:, j].unsqueeze(dim=1) * temp
+                c = ((c - temp) > 0).to(child.dtype)
+            c[:, i] = 1
+            child[:, i] = c / c.sum(dim=1, keepdim=True)
         return child
 
 
