@@ -11,12 +11,13 @@ import numpy as np
 
 
 class SubDataset(Dataset):
-    def __init__(self, evaluate, total, base_name, num_parts, shape):
+    def __init__(self, evaluate, total, base_name, num_parts, shape, loss_method):
         self.evaluate = evaluate
         self.total = total
         self.base_name = base_name
         self.num_parts = num_parts
         self.shape = shape
+        self.loss_method = loss_method
         self.current_part = 1
         self.passed_index = 0
         self.dataset = None
@@ -28,8 +29,7 @@ class SubDataset(Dataset):
         all_input_ids = torch.tensor([f.input_ids for f in features], dtype=torch.long)
         all_input_mask = torch.tensor([f.input_mask for f in features], dtype=torch.long)
         all_segment_ids = torch.tensor([f.segment_ids for f in features], dtype=torch.long)
-        all_cls_index = torch.tensor([f.cls_index for f in features], dtype=torch.long)
-        all_p_mask = torch.tensor([f.p_mask for f in features], dtype=torch.float)
+        all_tag_depth = torch.tensor([f.depth for f in features], dtype=torch.long)
         all_gat_mask = [f.gat_mask for f in features]
         all_base_index = [f.base_index for f in features]
         all_tag_to_token = [f.tag_to_token_index for f in features]
@@ -37,16 +37,17 @@ class SubDataset(Dataset):
         if self.evaluate:
             all_example_index = torch.arange(all_input_ids.size(0), dtype=torch.long)
             self.dataset = StrucDataset(all_input_ids, all_input_mask, all_segment_ids, all_example_index,
-                                        all_cls_index, all_p_mask, gat_mask=all_gat_mask, base_index=all_base_index,
+                                        all_tag_depth, gat_mask=all_gat_mask, base_index=all_base_index,
                                         tag2tok=all_tag_to_token, shape=self.shape,
                                         training=False)
         else:
-            all_answer_tid = torch.tensor([f.answer_tid for f in features], dtype=torch.long)
+            all_answer_tid = torch.tensor([f.answer_tid for f in features],
+                                          dtype=torch.long if self.loss_method != 'soft' else torch.float)
             all_start_positions = torch.tensor([f.start_position for f in features], dtype=torch.long)
             all_end_positions = torch.tensor([f.end_position for f in features], dtype=torch.long)
             self.dataset = StrucDataset(all_input_ids, all_input_mask, all_segment_ids,
-                                        all_answer_tid, all_start_positions, all_end_positions,
-                                        all_cls_index, all_p_mask, gat_mask=all_gat_mask, base_index=all_base_index,
+                                        all_answer_tid, all_start_positions, all_end_positions, all_tag_depth,
+                                        gat_mask=all_gat_mask, base_index=all_base_index,
                                         tag2tok=all_tag_to_token, shape=self.shape,
                                         training=True)
 
@@ -87,6 +88,8 @@ class StrucDataset(Dataset):
     def __getitem__(self, index):
         output = [tensor[index] for tensor in self.tensors]
 
+        output.append(self.base_index[index])
+
         gat_mask = np.load(self.gat_mask[index])
         gat_mask = torch.tensor(gat_mask, dtype=torch.long)
         output.append(gat_mask)
@@ -112,6 +115,7 @@ class GraphHtmlConfig(PretrainedConfig):
         super().__init__(**kwargs)
         self.method = args.method
         self.model_type = args.model_type
+        self.loss_method = args.loss_method
         self.num_hidden_layers = args.num_node_block
         self.max_depth_embeddings = args.max_depth_embeddings
 
@@ -120,22 +124,30 @@ class Link(nn.Module):
     def __init__(self, method, config):
         super().__init__()
         self.method = method
+        self.loss_method = config.loss_method
         self.add_position_embeddings = True if config.max_depth_embeddings is not None else False
+        self.sequential_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
+        self.register_buffer("sequential_ids", torch.arange(config.max_position_embeddings).expand((1, -1)))
         if self.add_position_embeddings:
-            self.sequential_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
-            self.depth_embeddings = nn.Embedding(config.max_depth_embeddings, config.hidden_size)
+            self.depth_embeddings = nn.Embedding(config.max_depth_embeddings, config.hidden_size, padding_idx=0)
 
-    def forward(self, inputs, tag_to_token, gat_mask):
+    def forward(self, inputs, tag_to_token, gat_mask, tag_depth):
         assert tag_to_token.dim() == 3
         modified_tag2token = self.deduce_direct_string(tag_to_token)
         modified_gat_mask = self.deduce_child(gat_mask)
         outputs = torch.matmul(modified_tag2token, inputs)
-        if modified_gat_mask is not None:
+        if self.method == 'init_child':
             for i in range(outputs.size(1) - 1, -1, -1):
-                outputs[:, i] = torch.matmul(modified_gat_mask[:, i].unsqueeze(dim=1), outputs).squeeze(dim=1)
+                outputs[:, i] = torch.matmul(modified_gat_mask[:, i].unsqueeze(dim=1).to(torch.float),
+                                             outputs).squeeze(dim=1)
+
+        sequential_ids = self.sequential_ids[:, :inputs.size(1)]
+        sequential_embeddings = self.sequential_embeddings(sequential_ids)
+        outputs = outputs + sequential_embeddings
         if self.add_position_embeddings:
-            ...  # TODO position embedding adding
-        return outputs
+            depth_embeddings = self.depth_embeddings(tag_depth)
+            outputs = outputs + depth_embeddings
+        return outputs, modified_gat_mask
 
     def deduce_direct_string(self, tag_to_token):
         if self.method not in ['init_direct', 'init_child']:
@@ -150,7 +162,7 @@ class Link(nn.Module):
         return temp
 
     def deduce_child(self, gat_mask):
-        if self.method != 'init_child':
+        if self.method != 'init_child' and self.loss_method != 'hierarchy':
             return None
         assert gat_mask.dim() == 3
         child = deepcopy(gat_mask)
@@ -172,6 +184,7 @@ class GraphHtmlBert(BertPreTrainedModel):
         super(GraphHtmlBert, self).__init__(config)
         self.method = config.method
         self.base_type = config.model_type
+        self.loss_method = config.loss_method
         if config.model_type == 'bert':
             self.ptm = PTMForQA.bert
         elif config.model_type == 'albert':
@@ -184,7 +197,16 @@ class GraphHtmlBert(BertPreTrainedModel):
         self.num_gat_layers = config.num_hidden_layers
         self.gat = BertEncoder(config)
         self.qa_outputs = PTMForQA.qa_outputs
-        self.gat_outputs = nn.Linear(config.hidden_size, 1)
+        self.hidden_size = config.hidden_size
+        if self.loss_method == 'hierarchy':
+            self.gat_outputs = nn.Linear(config.hidden_size, config.hidden_size * 2)
+            self.stop_margin = torch.nn.Parameter(torch.randn(1, dtype=torch.float), requires_grad=True)
+        elif self.loss_method == 'multi':
+            self.gat_outputs = nn.Linear(config.hidden_size, 2)
+            self.stop_margin = None
+        else:
+            self.gat_outputs = nn.Linear(config.hidden_size, 1)
+            self.stop_margin = None
 
     def forward(
             self,
@@ -199,6 +221,8 @@ class GraphHtmlBert(BertPreTrainedModel):
             end_positions=None,
             answer_tid=None,
             tag_to_tok=None,
+            base_index=None,
+            tag_depth=None,
     ):
 
         outputs = self.ptm(
@@ -218,7 +242,7 @@ class GraphHtmlBert(BertPreTrainedModel):
         end_logits = end_logits.squeeze(-1)
         outputs = (start_logits, end_logits,) + outputs
 
-        gat_inputs = self.link(sequence_output, tag_to_tok, gat_mask)
+        gat_inputs, children = self.link(sequence_output, tag_to_tok, gat_mask, tag_depth)
         if head_mask is None:
             head_mask = [None] * self.num_gat_layers
         extended_gat_mask = gat_mask[:, None, :, :]
@@ -226,6 +250,21 @@ class GraphHtmlBert(BertPreTrainedModel):
         final_outputs = gat_outputs[0]
         tag_logits = self.gat_outputs(final_outputs)
         tag_logits = tag_logits.squeeze(-1)
+        if self.loss_method == 'hierarchy':
+            for ind in range(children.size(-1)):
+                children[:, ind, ind] = 0
+            for ind in range(children.size(0)):
+                children[ind, base_index[ind], 0] = 1
+            children[children > 0] = 1
+            tag_logits = torch.matmul(tag_logits[:, :, :self.hidden_size],
+                                      tag_logits[:, :, self.hidden_size:].permute(0, 2, 1))
+            tag_logits = tag_logits * children
+            b, t, _ = tag_logits.size()
+            tag_logits = torch.cat([tag_logits,
+                                    self.stop_margin.unsqueeze(0).unsqueeze(0).repeat((b, t, 1))], dim=2)
+        if self.loss_method in ['hierarchy', 'multi']:
+            prob, index = tag_logits.max(dim=2)
+            outputs = (prob, index,) + outputs
         outputs = (tag_logits,) + outputs
 
         if start_positions is not None and end_positions is not None:
@@ -246,15 +285,28 @@ class GraphHtmlBert(BertPreTrainedModel):
             outputs = (total_loss,) + outputs
 
         if answer_tid is not None:
-            # If we are on multi-GPU, split add a dimension
             if len(answer_tid.size()) > 1:
                 answer_tid = answer_tid.squeeze(-1)
-            # sometimes the start/end positions are outside our model inputs, we ignore these terms
             ignored_index = tag_logits.size(1)
             answer_tid.clamp_(0, ignored_index)
-
-            loss_fct = torch.nn.CrossEntropyLoss(ignore_index=ignored_index)
+            if self.loss_method == 'base':
+                loss_fct = torch.nn.CrossEntropyLoss(ignore_index=ignored_index)
+            elif self.loss_method == 'soft':
+                loss_fct = torch.nn.KLDivLoss()
+            elif self.loss_method == 'multi':
+                loss_fct = torch.nn.CrossEntropyLoss(ignore_index=ignored_index)
+                b, t = answer_tid.size()
+                tag_logits = tag_logits.reshape((b * t, -1))
+                answer_tid = answer_tid.reshape((b * t))
+            elif self.loss_method == 'hierarchy':
+                loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-1)
+                b, t = answer_tid.size()
+                tag_logits = tag_logits.reshape((b * t, -1))
+                answer_tid = answer_tid.reshape((b * t))
+            else:
+                raise NotImplementedError('Loss method {} is not implemented yet'.format(self.loss_method))
             loss = loss_fct(tag_logits, answer_tid)
             outputs = (loss,) + outputs
 
-        return outputs  # (loss), (total_loss), tag_logits, start_logits, end_logits, (hidden_states), (attentions)
+        return outputs
+        # (loss), (total_loss), tag_logits, (prob, index), start_logits, end_logits, (hidden_states), (attentions)

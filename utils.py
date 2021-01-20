@@ -17,25 +17,21 @@
 
 from __future__ import absolute_import, division, print_function
 
-# import re
 import json
 import logging
 import math
 import collections
 import sys
 from io import open
-from tqdm import tqdm
 from os import path as osp
-import numpy as np
 import random
 
+from tqdm import tqdm
+import numpy as np
 import bs4
 from bs4 import BeautifulSoup as bs
-
 from transformers.tokenization_bert import BasicTokenizer, whitespace_tokenize
 
-# Required by XLNet evaluation method to compute optimal threshold (see write_predictions_extended() method)
-from utils_evaluate import find_all_best_thresh_v2, make_qid_to_has_ans, get_raw_scores
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +57,8 @@ class SquadExample(object):
                  all_doc_tokens=None,
                  tok_to_tags_index=None,
                  tags_to_tok_index=None,
-                 orig_tags=None):
+                 orig_tags=None,
+                 tag_depth=None):
         self.doc_tokens = doc_tokens
         self.qas_id = qas_id
         self.html_tree = html_tree
@@ -77,6 +74,7 @@ class SquadExample(object):
         self.tok_to_tags_index = tok_to_tags_index
         self.tags_to_tok_index = tags_to_tok_index
         self.orig_tags = orig_tags
+        self.tag_depth = tag_depth
 
     def __str__(self):
         return self.__repr__()
@@ -109,14 +107,13 @@ class InputFeatures(object):
                  gat_mask,
                  input_mask,
                  segment_ids,
-                 cls_index,
-                 p_mask,
                  paragraph_len,
                  answer_tid=None,
                  start_position=None,
                  end_position=None,
                  tag_to_token_index=None,
                  app_tags=None,
+                 depth=None,
                  base_index=None,
                  is_impossible=None):
         self.unique_id = unique_id
@@ -130,14 +127,13 @@ class InputFeatures(object):
         self.gat_mask = gat_mask
         self.input_mask = input_mask
         self.segment_ids = segment_ids
-        self.cls_index = cls_index
-        self.p_mask = p_mask
         self.paragraph_len = paragraph_len
         self.answer_tid = answer_tid
         self.start_position = start_position
         self.end_position = end_position
         self.tag_to_token_index = tag_to_token_index
         self.app_tags = app_tags
+        self.depth = depth
         self.base_index = base_index
         self.is_impossible = is_impossible
 
@@ -151,7 +147,7 @@ def html_escape(html):
     return html
 
 
-def read_squad_examples(input_file, is_training, version_2_with_negative, tokenizer, simplify=False):
+def read_squad_examples(input_file, is_training, tokenizer, simplify=False):
     """Read a SQuAD json file into a list of SquadExample."""
     with open(input_file, "r", encoding='utf-8') as reader:
         input_data = json.load(reader)["data"]
@@ -246,6 +242,18 @@ def read_squad_examples(input_file, is_training, version_2_with_negative, tokeni
         assert len(path) == 0, h
         return w2t, t2w, tags
 
+    def calculate_depth(html_code):
+        def _calc_depth(tag, depth):
+            for t in tag.contents:
+                if type(t) != bs4.element.Tag:
+                    continue
+                tag_depth.append(depth)
+                _calc_depth(t, depth + 1)
+        tag_depth = []
+        _calc_depth(html_code, 1)
+        tag_depth += [2, 2]
+        return tag_depth
+
     # def check_for_index(t2w, token, h):
     #     for ind in range(len(t2w) - 2):
     #         e = h.find(tid=ind)
@@ -298,7 +306,9 @@ def read_squad_examples(input_file, is_training, version_2_with_negative, tokeni
             if simplify:
                 for qa in website["qas"]:
                     qas_id = qa["id"]
-                    example = SquadExample(doc_tokens=doc_tokens, qas_id=qas_id)
+                    tag_depth = calculate_depth(html_code)
+                    example = SquadExample(doc_tokens=doc_tokens, qas_id=qas_id,
+                                           html_tree=html_code, tag_depth=tag_depth)
                     examples.append(example)
             else:
                 # Tokenize all doc tokens
@@ -327,47 +337,38 @@ def read_squad_examples(input_file, is_training, version_2_with_negative, tokeni
                     start_position = None
                     end_position = None
                     orig_answer_text = None
-                    is_impossible = False
+                    tag_depth = calculate_depth(html_code)
 
                     if is_training:
-                        if version_2_with_negative:
-                            is_impossible = qa["is_impossible"]
-                        if (len(qa["answers"]) != 1) and (not is_impossible):
-                            raise ValueError(
-                                "For training, each question should have exactly 1 answer.")
-                        if not is_impossible:
-                            answer = qa["answers"][0]
-                            orig_answer_text = answer["text"]
-                            if answer["element_id"] == -1:
-                                answer_tid = len(orig_tags) - 2 + answer["answer_start"]
-                                num_char = len(char_to_word_offset) - 2
-                            else:
-                                answer_tid = answer["element_id"]
-                                num_char = calc_num_from_raw_text_list(e_id_to_t_id(answer["element_id"], html_code),
-                                                                       raw_text_list)
-                            answer_offset = num_char + answer["answer_start"]
-                            answer_length = len(orig_answer_text) if answer["element_id"] != -1 else 1
-                            start_position = char_to_word_offset[answer_offset]
-                            end_position = char_to_word_offset[answer_offset + answer_length - 1]
-                            node_text = doc_tokens[tok_to_orig_index[tags_to_tok_index[answer_tid]['start']]:
-                                                   tok_to_orig_index[tags_to_tok_index[answer_tid]['end']] + 1]
-                            node_text = ' '.join([s for s in node_text if s[0] != '<' or s[-1] != '>'])
-                            cleaned_answer_text = " ".join(whitespace_tokenize(orig_answer_text))
-                            if node_text.find(cleaned_answer_text) == -1:
-                                logger.warning("Could not find answer of question %s: '%s' vs. '%s'",
-                                               qa['id'], node_text, cleaned_answer_text)
-                                continue
-                            actual_text = " ".join([w for w in doc_tokens[start_position:(end_position + 1)]
-                                                    if w[0] != '<' or w[-1] != '>'])
-                            if actual_text.find(cleaned_answer_text) == -1:
-                                logger.warning("Could not find answer of question %s: '%s' vs. '%s'",
-                                               qa['id'], actual_text, cleaned_answer_text)
-                                continue
+                        if len(qa["answers"]) != 1:
+                            raise ValueError("For training, each question should have exactly 1 answer.")
+                        answer = qa["answers"][0]
+                        orig_answer_text = answer["text"]
+                        if answer["element_id"] == -1:
+                            answer_tid = len(orig_tags) - 2 + answer["answer_start"]
+                            num_char = len(char_to_word_offset) - 2
                         else:
-                            answer_tid = -1
-                            start_position = -1
-                            end_position = -1
-                            orig_answer_text = ""
+                            answer_tid = answer["element_id"]
+                            num_char = calc_num_from_raw_text_list(e_id_to_t_id(answer["element_id"], html_code),
+                                                                   raw_text_list)
+                        answer_offset = num_char + answer["answer_start"]
+                        answer_length = len(orig_answer_text) if answer["element_id"] != -1 else 1
+                        start_position = char_to_word_offset[answer_offset]
+                        end_position = char_to_word_offset[answer_offset + answer_length - 1]
+                        node_text = doc_tokens[tok_to_orig_index[tags_to_tok_index[answer_tid]['start']]:
+                                               tok_to_orig_index[tags_to_tok_index[answer_tid]['end']] + 1]
+                        node_text = ' '.join([s for s in node_text if s[0] != '<' or s[-1] != '>'])
+                        cleaned_answer_text = " ".join(whitespace_tokenize(orig_answer_text))
+                        if node_text.find(cleaned_answer_text) == -1:
+                            logger.warning("Could not find answer of question %s: '%s' vs. '%s'",
+                                           qa['id'], node_text, cleaned_answer_text)
+                            continue
+                        actual_text = " ".join([w for w in doc_tokens[start_position:(end_position + 1)]
+                                                if w[0] != '<' or w[-1] != '>'])
+                        if actual_text.find(cleaned_answer_text) == -1:
+                            logger.warning("Could not find answer of question %s: '%s' vs. '%s'",
+                                           qa['id'], actual_text, cleaned_answer_text)
+                            continue
 
                     example = SquadExample(
                         doc_tokens=doc_tokens,
@@ -378,25 +379,24 @@ def read_squad_examples(input_file, is_training, version_2_with_negative, tokeni
                         answer_tid=answer_tid,
                         start_position=start_position,
                         end_position=end_position,
-                        is_impossible=is_impossible,
+                        is_impossible=False,
                         tok_to_orig_index=tok_to_orig_index,
                         orig_to_tok_index=orig_to_tok_index,
                         all_doc_tokens=all_doc_tokens,
                         tok_to_tags_index=tok_to_tags_index,
                         tags_to_tok_index=tags_to_tok_index,
                         orig_tags=orig_tags,
+                        tag_depth=tag_depth
                     )
                     examples.append(example)
     return examples, all_tag_list
 
 
-def convert_examples_to_features(examples, tokenizer, max_seq_length, max_tag_length,
-                                 doc_stride, max_query_length, is_training,
-                                 cls_token_at_end=False,
+def convert_examples_to_features(examples, tokenizer, loss_method, max_seq_length, max_tag_length,
+                                 doc_stride, max_query_length, is_training, soft_remain, soft_decay,
                                  cls_token='[CLS]', sep_token='[SEP]', pad_token=0,
                                  sequence_a_segment_id=0, sequence_b_segment_id=1,
                                  cls_token_segment_id=0, pad_token_segment_id=0,
-                                 sequence_a_is_doc=False,
                                  sample_size=None, save_dir='./', no_save=False):
     """Loads a data file into a list of `InputBatch`s."""
 
@@ -426,11 +426,54 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length, max_tag_le
         _unit(tree)
         return adj
 
+    def label_generating(html_tree, origin_answer_tid, app_tags, base):
+        if loss_method == 'base' or not is_training:
+            return origin_answer_tid
+        t, path = 1, [origin_answer_tid]
+        if loss_method == 'soft':
+            marker = np.zeros(max_tag_length, dtype=np.float)
+        else:
+            marker = np.zeros(max_tag_length, dtype=np.int)
+        marker[origin_answer_tid] = t
+        if origin_answer_tid != 0:
+            tag = html_tree.find(tid=app_tags[origin_answer_tid - base])
+            if tag is None:
+                if loss_method == 'soft':
+                    marker[origin_answer_tid] = soft_remain
+                    marker[base] = 1 - soft_remain
+                else:
+                    marker[origin_answer_tid] = 1
+                    marker[base] = 1
+                path.append(base)
+            else:
+                for p in list(tag.parents):
+                    if type(p) == bs4.BeautifulSoup:
+                        break
+                    if p['tid'] in app_tags:
+                        path.append(app_tags.index(p['tid']) + base)
+                        marker[app_tags.index(p['tid']) + base] = t
+                        if loss_method == 'soft':
+                            t *= soft_decay
+                if loss_method == 'soft':
+                    temp = marker.sum() - 1
+                    if temp != 0:
+                        marker[origin_answer_tid] = temp * soft_remain / (1 - soft_remain)
+                        marker /= marker.sum()
+        if loss_method == 'hierarchy':
+            labels = np.zeros(max_tag_length, dtype=np.int) - 1
+            if marker[0] != 1:
+                labels[path[0]] = max_tag_length
+                for ind in range(1, len(path)):
+                    labels[path[ind]] = path[ind - 1]
+            else:
+                labels[base] = 0
+            answer_tid = labels.tolist()
+        else:
+            answer_tid = marker.tolist()
+        return answer_tid
+
     unique_id = 1000000000
-    # cnt_pos, cnt_neg = 0, 0
-    # max_N, max_M = 1024, 1024
-    # f = np.zeros((max_N, max_M), dtype=np.float32)
-    features, cls_index = [], None
+    features = []
 
     if sample_size is not None:
         sampled_index = random.sample(range(0, len(examples)), sample_size)
@@ -495,34 +538,26 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length, max_tag_le
             token_is_max_context = {}
             segment_ids = []
             tag_to_token_index = []
+            depth = []
 
-            # p_mask: mask with 1 for token than cannot be in the answer (0 for token which can be in an answer)
-            # Original TF implem also keep the classification token (set to 0) (not sure why...)
-            p_mask = []
+            # CLS
+            tokens.append(cls_token)
+            segment_ids.append(cls_token_segment_id)
+            tag_to_token_index.append([0, 0])
+            depth.append(0)
 
-            # CLS token at the beginning
-            if not cls_token_at_end:
-                tokens.append(cls_token)
-                segment_ids.append(cls_token_segment_id)
-                p_mask.append(0)
-                cls_index = 0
-                tag_to_token_index.append([0, 0])
+            # Query
+            for i in range(len(query_tokens)):
+                tag_to_token_index.append([len(tokens) + i, len(tokens) + i])
+            tokens += query_tokens
+            segment_ids += [sequence_a_segment_id] * len(query_tokens)
+            depth += [0] * len(query_tokens)
 
-            # XLNet: P SEP Q SEP CLS
-            # Others: CLS Q SEP P SEP
-            if not sequence_a_is_doc:
-                # Query
-                for i in range(len(query_tokens)):
-                    tag_to_token_index.append([len(tokens) + i, len(tokens) + i])
-                tokens += query_tokens
-                segment_ids += [sequence_a_segment_id] * len(query_tokens)
-                p_mask += [1] * len(query_tokens)
-
-                # SEP token
-                tokens.append(sep_token)
-                segment_ids.append(sequence_a_segment_id)
-                p_mask.append(1)
-                tag_to_token_index.append([len(tokens) - 1, len(tokens) - 1])
+            # SEP token
+            tokens.append(sep_token)
+            segment_ids.append(sequence_a_segment_id)
+            tag_to_token_index.append([len(tokens) - 1, len(tokens) - 1])
+            depth.append(0)
 
             # Paragraph
             app_tags = []
@@ -543,6 +578,8 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length, max_tag_le
                     end = min(end, doc_span.start + doc_span.length - 1) - doc_span.start + len(tokens)
                     tag_to_token_index.append([start, end])
                     app_tags.append(i)
+            for ind in app_tags:
+                depth.append(example.tag_depth[ind])
             # if len(app_tags) > max_tag_length - 4:
             if len(app_tags) > max_tag_length - len(query_tokens) - 3:
                 raise ValueError('Max tag length is not big enough')
@@ -553,44 +590,19 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length, max_tag_le
                                                        split_token_index)
                 token_is_max_context[len(tokens)] = is_max_context
                 tokens.append(example.all_doc_tokens[split_token_index])
-                if not sequence_a_is_doc:
-                    segment_ids.append(sequence_b_segment_id)
-                else:
-                    segment_ids.append(sequence_a_segment_id)
-                p_mask.append(0)
+                segment_ids.append(sequence_b_segment_id)
             paragraph_len = doc_span.length
-
-            if sequence_a_is_doc:
-                # SEP token
-                tokens.append(sep_token)
-                segment_ids.append(sequence_a_segment_id)
-                p_mask.append(1)
-                tag_to_token_index.append([len(tokens) - 1, len(tokens) - 1])
-
-                for i in range(len(query_tokens)):
-                    tag_to_token_index.append([len(tokens) + i, len(tokens) + i])
-                tokens += query_tokens
-                segment_ids += [sequence_b_segment_id] * len(query_tokens)
-                p_mask += [1] * len(query_tokens)
 
             # SEP token
             tokens.append(sep_token)
             segment_ids.append(sequence_b_segment_id)
-            p_mask.append(1)
             tag_to_token_index.append([len(tokens) - 1, len(tokens) - 1])
-
-            # CLS token at the end
-            if cls_token_at_end:
-                tokens.append(cls_token)
-                segment_ids.append(cls_token_segment_id)
-                p_mask.append(0)
-                cls_index = len(tokens) - 1  # Index of classification token
-                tag_to_token_index.append([len(tokens) - 1, len(tokens) - 1])
+            depth.append(0)
 
             input_ids = tokenizer.convert_tokens_to_ids(tokens)
 
             # mask generating
-            base = len(query_tokens) + 2 if not sequence_a_is_doc else 0
+            base = len(query_tokens) + 2
             gat_mask = np.zeros((max_tag_length, max_tag_length), dtype=np.int)
             gat_mask[:, :len(tag_to_token_index)] = 1
             gat_mask[base:base + len(app_tags), base:base + len(app_tags)] = _form_tree_mask(app_tags,
@@ -606,14 +618,15 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length, max_tag_le
                 input_ids.append(pad_token)
                 input_mask.append(0)
                 segment_ids.append(pad_token_segment_id)
-                p_mask.append(1)
+            while len(depth) < max_tag_length:
+                depth.append(0)
 
             assert len(input_ids) == max_seq_length
             assert len(input_mask) == max_seq_length
             assert len(segment_ids) == max_seq_length
 
             span_is_impossible = example.is_impossible
-            answer_tid = 0
+            answer_tid = None
             start_position = None
             end_position = None
             if is_training and not span_is_impossible:
@@ -622,25 +635,18 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length, max_tag_le
                 doc_start = doc_span.start
                 doc_end = doc_span.start + doc_span.length - 1
                 if not (tok_start_position >= doc_start and tok_end_position <= doc_end):
+                    answer_tid = 0
                     start_position = 0
                     end_position = 0
                     span_is_impossible = True
                 else:
                     assert tok_answer_tid in app_tags
-                    answer_tid = app_tags.index(tok_answer_tid)
-                    start_position = tok_start_position - doc_start
-                    end_position = tok_end_position - doc_start
                     offset = len(query_tokens) + 2
-                    if not sequence_a_is_doc:
-                        answer_tid += offset
-                        start_position += offset
-                        end_position += offset
+                    answer_tid = app_tags.index(tok_answer_tid) + offset
+                    start_position = tok_start_position - doc_start + offset
+                    end_position = tok_end_position - doc_start + offset
 
-            if is_training and span_is_impossible:
-                answer_tid = cls_index
-                start_position = cls_index
-                end_position = cls_index
-
+            answer_tid = label_generating(example.html_tree, answer_tid, app_tags, base)
             features.append(
                 InputFeatures(
                     unique_id=unique_id,
@@ -654,15 +660,14 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length, max_tag_le
                     input_mask=input_mask,
                     gat_mask=gat_mask_dir,
                     segment_ids=segment_ids,
-                    cls_index=cls_index,
-                    p_mask=p_mask,
                     paragraph_len=paragraph_len,
                     answer_tid=answer_tid,
                     start_position=start_position,
                     end_position=end_position,
                     tag_to_token_index=tag_to_token_index,
                     app_tags=app_tags,
-                    base_index=len(query_tokens) + 2 if not sequence_a_is_doc else 0,
+                    depth=depth,
+                    base_index=base,
                     is_impossible=span_is_impossible,
                 ))
             unique_id += 1
@@ -748,7 +753,7 @@ RawResult = collections.namedtuple("RawResult",
                                    ["unique_id", "tag_logits", "start_logits", "end_logits"])
 
 
-def write_predictions(all_examples, all_features, all_results, n_best_size,
+def write_predictions(loss_method, all_examples, all_features, all_results, n_best_size, n_best_tag_size,
                       max_answer_length, do_lower_case, output_prediction_file, output_tag_prediction_file,
                       output_nbest_file, verbose_logging, write_pred):
     """Write final predictions to the json file and log-odds of null if needed."""
@@ -782,12 +787,29 @@ def write_predictions(all_examples, all_features, all_results, n_best_size,
             result = unique_id_to_result[feature.unique_id]
             possible_values = [0] + [ind for ind in range(feature.base_index,
                                                           feature.base_index + len(feature.app_tags))]
-            tag_indexes = _get_best_tags(result.tag_logits, 1, possible_values)
+            if loss_method == 'multi':
+                raise NotImplementedError()  # TODO implementation
+            elif loss_method == 'hierarchy':
+                curr = feature.base_index
+                tag_indexes = [curr]
+                while result.tag_logits[1][curr] in possible_values and curr != 0\
+                        and len(tag_indexes) < len(feature.app_tags):
+                    curr = result.tag_logits[1][curr]
+                    tag_indexes.append(curr)
+                tag_indexes = tag_indexes[-n_best_tag_size:]
+            else:
+                tag_indexes = _get_best_tags(result.tag_logits, n_best_tag_size, possible_values)
             start_indexes = _get_best_indexes(result.start_logits, n_best_size)
             end_indexes = _get_best_indexes(result.end_logits, n_best_size)
             for tag_index in tag_indexes:
                 if tag_index == 0:
                     continue
+                if loss_method == 'multi':
+                    raise NotImplementedError()
+                elif loss_method == 'hierarchy':
+                    tag_logit = result.tag_logits[0][tag_index]  # TODO not reasonable yet
+                else:
+                    tag_logit = result.tag_logits[tag_index]
                 tag_id = feature.app_tags[tag_index - feature.base_index]
                 left_bound, right_bound = feature.tag_to_token_index[tag_index]
                 for start_index in start_indexes:
@@ -816,13 +838,13 @@ def write_predictions(all_examples, all_features, all_results, n_best_size,
                                 tag_index=tag_index,
                                 start_index=start_index,
                                 end_index=end_index,
-                                tag_logit=result.tag_logits[tag_index],
+                                tag_logit=tag_logit,
                                 start_logit=result.start_logits[start_index],
                                 end_logit=result.end_logits[end_index],
                                 tag_id=tag_id))
         prelim_predictions = sorted(
             prelim_predictions,
-            key=lambda x: (x.tag_logit + x.start_logit + x.end_logit),
+            key=lambda x: (x.start_logit + x.end_logit),
             reverse=True)
 
         _NBestPrediction = collections.namedtuple(
@@ -902,7 +924,7 @@ def write_predictions(all_examples, all_features, all_results, n_best_size,
         best_text = ' '.join([w for w in best_text if w[0] != '<' or w[-1] != '>'])
         all_predictions[example.qas_id] = best_text
         best_tag = nbest_json[0]["tag_id"]
-        all_predictions[example.qas_id] = best_tag
+        all_tag_predictions[example.qas_id] = best_tag
         all_nbest_json[example.qas_id] = nbest_json
 
     if write_pred:

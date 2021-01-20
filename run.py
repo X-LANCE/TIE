@@ -24,20 +24,13 @@ import random
 import glob
 import timeit
 
+from tqdm import tqdm, trange
 import numpy as np
 import torch
 from torch.utils.data import (DataLoader, RandomSampler, SequentialSampler)
 from torch.utils.data.distributed import DistributedSampler
-
-try:
-    from torch.utils.tensorboard import SummaryWriter
-except ImportError:
-    from tensorboardX import SummaryWriter
-
-from tqdm import tqdm, trange
-
+from tensorboardX import SummaryWriter
 from transformers import (
-    MODEL_FOR_QUESTION_ANSWERING_MAPPING,
     WEIGHTS_NAME,
     AdamW,
     AutoConfig,
@@ -46,10 +39,10 @@ from transformers import (
     get_linear_schedule_with_warmup,
 )
 
-from model import GraphHtmlConfig, GraphHtmlBert, StrucDataset, SubDataset
 
-from utils import (read_squad_examples, convert_examples_to_features,
-                   RawResult, write_predictions)
+from model import GraphHtmlConfig, GraphHtmlBert, StrucDataset, SubDataset
+from utils import read_squad_examples, convert_examples_to_features, RawResult, write_predictions
+
 
 # The following import is the official SQuAD evaluation script (2.0).
 # You can remove it from the dependencies if you are using this script outside of the library
@@ -57,9 +50,6 @@ from utils import (read_squad_examples, convert_examples_to_features,
 from utils_evaluate import EVAL_OPTS, main as evaluate_on_squad
 
 logger = logging.getLogger(__name__)
-
-MODEL_CONFIG_CLASSES = list(MODEL_FOR_QUESTION_ANSWERING_MAPPING.keys())
-MODEL_TYPES = tuple(conf.model_type for conf in MODEL_CONFIG_CLASSES)
 
 
 def set_seed(args):
@@ -176,18 +166,16 @@ def train(args, train_dataset, model, tokenizer):
             batch = tuple(t.to(args.device) for t in batch)
             inputs = {'input_ids'      : batch[0],
                       'attention_mask' : batch[1],
-                      'gat_mask'       : batch[-2],
+                      'token_type_ids' : batch[2],
                       'answer_tid'     : batch[3],
                       'start_positions': batch[4],
                       'end_positions'  : batch[5],
+                      'tag_depth'      : batch[6],
+                      'base_index'     : batch[-3],
+                      'gat_mask'       : batch[-2],
                       'tag_to_tok'     : batch[-1]}
-            if args.model_type != 'distilbert':
-                inputs['token_type_ids'] = None if args.model_type == 'xlm' else batch[2]
-            if args.model_type in ['xlnet', 'xlm']:
-                inputs.update({'cls_index': batch[6],
-                               'p_mask'   : batch[7]})
             outputs = model(**inputs)
-            loss = outputs[0]  # model outputs are always tuple in transformers (see doc)
+            loss = args.loss_gamma * outputs[0] + outputs[1]
 
             if args.n_gpu > 1:
                 loss = loss.mean()  # mean() to average on multi-gpu parallel (not distributed) training
@@ -278,23 +266,27 @@ def evaluate(args, model, tokenizer, prefix="", write_pred=True):
         with torch.no_grad():
             inputs = {'input_ids'      : batch[0],
                       'attention_mask' : batch[1],
+                      'token_type_ids' : batch[2],
+                      'tag_depth'      : batch[4],
+                      'base_index'     : batch[-3],
                       'gat_mask'       : batch[-2],
                       'tag_to_tok'     : batch[-1]}
-            if args.model_type != 'distilbert':
-                inputs['token_type_ids'] = None if args.model_type == 'xlm' else batch[2]  # XLM don't use segment_ids
             example_indices = batch[3]
-            if args.model_type in ['xlnet', 'xlm']:
-                inputs.update({'cls_index': batch[4],
-                               'p_mask'   : batch[5]})
             outputs = model(**inputs)
 
         for i, example_index in enumerate(example_indices):
             eval_feature = features[example_index.item()]
             unique_id = int(eval_feature.unique_id)
-            result = RawResult(unique_id=unique_id,
-                               tag_logits=to_list(outputs[0][i]),
-                               start_logits=to_list(outputs[1][i]),
-                               end_logits=to_list(outputs[2][i]))
+            if args.loss_method in ['hierarchy', 'multi']:
+                result = RawResult(unique_id=unique_id,
+                                   tag_logits=(to_list(outputs[1][i]), to_list(outputs[2][i])),
+                                   start_logits=to_list(outputs[3][i]),
+                                   end_logits=to_list(outputs[4][i]))
+            else:
+                result = RawResult(unique_id=unique_id,
+                                   tag_logits=to_list(outputs[0][i]),
+                                   start_logits=to_list(outputs[1][i]),
+                                   end_logits=to_list(outputs[2][i]))
             all_results.append(result)
 
     eval_time = timeit.default_timer() - start_time
@@ -307,10 +299,10 @@ def evaluate(args, model, tokenizer, prefix="", write_pred=True):
     output_result_file = os.path.join(args.output_dir, "qas_eval_results_{}.json".format(prefix))
     output_file = os.path.join(args.output_dir, "eval_matrix_results_{}".format(prefix))
 
-    returns = write_predictions(examples, features, all_results, args.n_best_size,
+    returns = write_predictions(args.loss_method, examples, features, all_results, args.n_best_size, 1,
                                 args.max_answer_length, args.do_lower_case, output_prediction_file,
                                 output_tag_prediction_file, output_nbest_file, args.verbose_logging,
-                                write_pred=write_pred)
+                                write_pred=write_pred)  # TODO n best tag size greater than 1
     if not write_pred:
         output_prediction_file, output_tag_prediction_file = returns
 
@@ -331,10 +323,12 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, output_examples=Fal
 
     # Load data features from cache or dataset file
     input_file = args.predict_file if evaluate else args.train_file
-    cached_features_file = os.path.join(os.path.dirname(input_file), 'cached', 'cached_{}_{}_{}'.format(
+    base_cached_features_file = os.path.join(os.path.dirname(input_file), 'cached', 'cached_{}_{}_{}'.format(
         split,
         list(filter(None, args.model_name_or_path.split('/'))).pop(),
         str(args.max_seq_length)))
+    cached_features_file = '{}_{}'.format(base_cached_features_file, args.loss_method)
+    gat_cached_features_file = base_cached_features_file + '_gat'
 
     if os.path.exists(cached_features_file) and not args.overwrite_cache and not args.enforce:
         logger.info("Loading features from cached file %s", cached_features_file)
@@ -346,7 +340,6 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, output_examples=Fal
         if output_examples or not evaluate:
             examples, tag_list = read_squad_examples(input_file=input_file,
                                                      is_training=not evaluate,
-                                                     version_2_with_negative=args.version_2_with_negative,
                                                      tokenizer=tokenizer,
                                                      simplify=True)
             if not evaluate:
@@ -359,7 +352,6 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, output_examples=Fal
         if not evaluate:
             examples, tag_list = read_squad_examples(input_file=input_file,
                                                      is_training=not evaluate,
-                                                     version_2_with_negative=args.version_2_with_negative,
                                                      tokenizer=tokenizer,
                                                      simplify=True)
             tag_list = list(tag_list)
@@ -368,25 +360,23 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, output_examples=Fal
 
         examples, _ = read_squad_examples(input_file=input_file,
                                           is_training=not evaluate,
-                                          version_2_with_negative=args.version_2_with_negative,
                                           tokenizer=tokenizer,
                                           simplify=False)
 
-        if not os.path.exists(cached_features_file + '_gat'):
-            os.makedirs(cached_features_file + '_gat')
+        if not os.path.exists(gat_cached_features_file):
+            os.makedirs(gat_cached_features_file)
         features = convert_examples_to_features(examples=examples,
                                                 tokenizer=tokenizer,
+                                                loss_method=args.loss_method,
                                                 max_seq_length=args.max_seq_length,
                                                 doc_stride=args.doc_stride,
                                                 max_query_length=args.max_query_length,
                                                 max_tag_length=args.max_tag_length,
+                                                soft_remain=args.soft_remain,
+                                                soft_decay=args.soft_decay,
                                                 is_training=not evaluate,
-                                                cls_token_segment_id=2 if args.model_type in ['xlnet'] else 0,
-                                                pad_token_segment_id=3 if args.model_type in ['xlnet'] else 0,
-                                                cls_token_at_end=True if args.model_type in ['xlnet'] else False,
-                                                sequence_a_is_doc=True if args.model_type in ['xlnet'] else False,
                                                 sample_size=args.sample_size,
-                                                save_dir=cached_features_file + '_gat',
+                                                save_dir=gat_cached_features_file,
                                                 no_save=args.enforce)
         if args.local_rank in [-1, 0] and not args.enforce:
             logger.info("Saving features into cached file %s", cached_features_file)
@@ -413,7 +403,8 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, output_examples=Fal
         raise SystemError('Mission complete!')
 
     if args.separate_read and not evaluate:
-        dataset = SubDataset(evaluate, total, cached_features_file, 2, (args.max_tag_length, args.max_seq_length))
+        dataset = SubDataset(evaluate, total, cached_features_file, 2,
+                             (args.max_tag_length, args.max_seq_length), args.loss_method)
         if output_examples:
             dataset = (dataset, examples, features)
         return dataset
@@ -422,26 +413,25 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, output_examples=Fal
     all_input_ids = torch.tensor([f.input_ids for f in features], dtype=torch.long)
     all_input_mask = torch.tensor([f.input_mask for f in features], dtype=torch.long)
     all_segment_ids = torch.tensor([f.segment_ids for f in features], dtype=torch.long)
-    all_cls_index = torch.tensor([f.cls_index for f in features], dtype=torch.long)
-    all_p_mask = torch.tensor([f.p_mask for f in features], dtype=torch.float)
+    all_tag_depth = torch.tensor([f.depth for f in features], dtype=torch.long)
     all_gat_mask = [f.gat_mask for f in features]
     all_base_index = [f.base_index for f in features]
     all_tag_to_token = [f.tag_to_token_index for f in features]
-    # all_node_to_tag = torch.tensor([f.node_to_tag_index for f in features], dtype=torch.long)
 
     if evaluate:
         all_example_index = torch.arange(all_input_ids.size(0), dtype=torch.long)
-        dataset = StrucDataset(all_input_ids, all_input_mask, all_segment_ids, all_example_index,
-                               all_cls_index, all_p_mask, gat_mask=all_gat_mask, base_index=all_base_index,
+        dataset = StrucDataset(all_input_ids, all_input_mask, all_segment_ids, all_example_index, all_tag_depth,
+                               gat_mask=all_gat_mask, base_index=all_base_index,
                                tag2tok=all_tag_to_token, shape=(args.max_tag_length, args.max_seq_length),
                                training=False)
     else:
-        all_answer_tid = torch.tensor([f.answer_tid for f in features], dtype=torch.long)
+        all_answer_tid = torch.tensor([f.answer_tid for f in features],
+                                      dtype=torch.long if args.loss_method != 'soft' else torch.float)
         all_start_positions = torch.tensor([f.start_position for f in features], dtype=torch.long)
         all_end_positions = torch.tensor([f.end_position for f in features], dtype=torch.long)
         dataset = StrucDataset(all_input_ids, all_input_mask, all_segment_ids,
-                               all_answer_tid, all_start_positions, all_end_positions,
-                               all_cls_index, all_p_mask, gat_mask=all_gat_mask, base_index=all_base_index,
+                               all_answer_tid, all_start_positions, all_end_positions, all_tag_depth,
+                               gat_mask=all_gat_mask, base_index=all_base_index,
                                tag2tok=all_tag_to_token, shape=(args.max_tag_length, args.max_seq_length),
                                training=True)
 
@@ -459,7 +449,7 @@ def main():
     parser.add_argument("--predict_file", default=None, type=str, required=True,
                         help="SQuAD json for predictions. E.g., dev-v1.1.json or test-v1.1.json")
     parser.add_argument("--model_type", default=None, type=str, required=True,
-                        help="Model type selected in the list: " + ", ".join(MODEL_TYPES))
+                        help="Model type selected in the bert or electra models provided by huggingface")
     parser.add_argument("--model_name_or_path", default=None, type=str, required=True,
                         help="Path to pretrained model or model identifier from huggingface.co/models")
     parser.add_argument("--output_dir", default=None, type=str, required=True,
@@ -472,11 +462,6 @@ def main():
                         help="Pretrained tokenizer name or path if not the same as model_name")
     parser.add_argument("--cache_dir", default=None, type=str,
                         help="Where do you want to store the pre-trained models downloaded from s3")
-
-    parser.add_argument('--version_2_with_negative', action='store_true',
-                        help='If true, the SQuAD examples contain some that do not have an answer.')
-    parser.add_argument('--null_score_diff_threshold', type=float, default=0.0,
-                        help="If null_score - best_non_null is greater than the threshold predict null.")
 
     parser.add_argument("--max_seq_length", default=384, type=int,
                         help="The maximum total input sequence length after WordPiece tokenization. Sequences "
@@ -558,7 +543,6 @@ def main():
     parser.add_argument('--server_port', type=str, default='', help="Can be used for distant debugging.")
 
     parser.add_argument('--method', type=str, default="base", choices=['base', 'init_direct', 'init_child'])
-    parser.add_argument('--cnn_feature_dir', type=str, default=None)
     parser.add_argument('--enforce', action='store_true')
     parser.add_argument('--sample_size', type=int, default=None)
     parser.add_argument('--max_tag_length', type=int, default=384)
@@ -575,6 +559,10 @@ def main():
     parser.add_argument('--evaluate_split', type=str, default='dev', choices=['dev', 'test'])
     parser.add_argument('--max_depth_embeddings', type=str, default=None,
                         help='Set to the max depth embedding for node if want to use the position embeddings')
+    parser.add_argument('--loss_method', type=str, default='base', choices=['base', 'soft', 'multi', 'hierarchy'])
+    parser.add_argument('--soft_remain', type=float, default=0.8)
+    parser.add_argument('--soft_decay', type=float, default=0.5)
+    parser.add_argument('--loss_gamma', type=float, default=1)
     args = parser.parse_args()
 
     if os.path.exists(args.output_dir) and os.listdir(
