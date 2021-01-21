@@ -104,7 +104,6 @@ class InputFeatures(object):
                  token_to_orig_map,
                  token_is_max_context,
                  input_ids,
-                 gat_mask,
                  input_mask,
                  segment_ids,
                  paragraph_len,
@@ -124,7 +123,6 @@ class InputFeatures(object):
         self.token_to_orig_map = token_to_orig_map
         self.token_is_max_context = token_is_max_context
         self.input_ids = input_ids
-        self.gat_mask = gat_mask
         self.input_mask = input_mask
         self.segment_ids = segment_ids
         self.paragraph_len = paragraph_len
@@ -400,50 +398,17 @@ def convert_examples_to_features(examples, tokenizer, loss_method, max_seq_lengt
                                  sample_size=None, save_dir='./', no_save=False):
     """Loads a data file into a list of `InputBatch`s."""
 
-    def _form_tree_mask(app, tree):
-        path = []
-        adj = np.zeros((len(app), len(app)), dtype=np.int)
-        ind = np.diag_indices_from(adj)
-        adj[0] = 1
-        adj[:, 0] = 1
-        adj[ind] = 1
-
-        def _unit(node):
-            for ch in node.contents:
-                if type(ch) != bs4.element.Tag:
-                    continue
-                curr = int(ch['tid'])
-                if curr not in app:
-                    continue
-                curr = app.index(curr)
-                for par in path:
-                    adj[par][curr] = 1
-                    adj[curr][par] = 1
-                path.append(curr)
-                _unit(ch)
-                path.pop()
-
-        _unit(tree)
-        return adj
-
     def label_generating(html_tree, origin_answer_tid, app_tags, base):
         if loss_method == 'base' or not is_training:
             return origin_answer_tid
         t, path = 1, [origin_answer_tid]
-        if loss_method == 'soft':
-            marker = np.zeros(max_tag_length, dtype=np.float)
-        else:
-            marker = np.zeros(max_tag_length, dtype=np.int)
+        marker = np.zeros(max_tag_length, dtype=np.float)
         marker[origin_answer_tid] = t
         if origin_answer_tid != 0:
             tag = html_tree.find(tid=app_tags[origin_answer_tid - base])
             if tag is None:
-                if loss_method == 'soft':
-                    marker[origin_answer_tid] = soft_remain
-                    marker[base] = 1 - soft_remain
-                else:
-                    marker[origin_answer_tid] = 1
-                    marker[base] = 1
+                marker[origin_answer_tid] = soft_remain
+                marker[base] = 1 - soft_remain
                 path.append(base)
             else:
                 for p in list(tag.parents):
@@ -452,13 +417,11 @@ def convert_examples_to_features(examples, tokenizer, loss_method, max_seq_lengt
                     if p['tid'] in app_tags:
                         path.append(app_tags.index(p['tid']) + base)
                         marker[app_tags.index(p['tid']) + base] = t
-                        if loss_method == 'soft':
-                            t *= soft_decay
-                if loss_method == 'soft':
-                    temp = marker.sum() - 1
-                    if temp != 0:
-                        marker[origin_answer_tid] = temp * soft_remain / (1 - soft_remain)
-                        marker /= marker.sum()
+                        t *= soft_decay
+                temp = marker.sum() - 1
+                if temp != 0:
+                    marker[origin_answer_tid] = temp * soft_remain / (1 - soft_remain)
+                    marker /= marker.sum()
         if loss_method == 'hierarchy':
             labels = np.zeros(max_tag_length, dtype=np.int) - 1
             if marker[0] != 1:
@@ -603,14 +566,6 @@ def convert_examples_to_features(examples, tokenizer, loss_method, max_seq_lengt
 
             # mask generating
             base = len(query_tokens) + 2
-            gat_mask = np.zeros((max_tag_length, max_tag_length), dtype=np.int)
-            gat_mask[:, :len(tag_to_token_index)] = 1
-            gat_mask[base:base + len(app_tags), base:base + len(app_tags)] = _form_tree_mask(app_tags,
-                                                                                             example.html_tree)
-            gat_mask_dir = osp.join(save_dir, str(unique_id) + '.npy')
-            if not no_save:
-                print('save!')
-                np.save(gat_mask_dir, gat_mask.astype(np.bool))
             input_mask = [1] * len(input_ids)
 
             # Zero-pad up to the sequence length.
@@ -624,6 +579,7 @@ def convert_examples_to_features(examples, tokenizer, loss_method, max_seq_lengt
             assert len(input_ids) == max_seq_length
             assert len(input_mask) == max_seq_length
             assert len(segment_ids) == max_seq_length
+            assert len(depth) == max_tag_length
 
             span_is_impossible = example.is_impossible
             answer_tid = None
@@ -658,7 +614,6 @@ def convert_examples_to_features(examples, tokenizer, loss_method, max_seq_lengt
                     token_is_max_context=token_is_max_context,
                     input_ids=input_ids,
                     input_mask=input_mask,
-                    gat_mask=gat_mask_dir,
                     segment_ids=segment_ids,
                     paragraph_len=paragraph_len,
                     answer_tid=answer_tid,
@@ -787,9 +742,7 @@ def write_predictions(loss_method, all_examples, all_features, all_results, n_be
             result = unique_id_to_result[feature.unique_id]
             possible_values = [0] + [ind for ind in range(feature.base_index,
                                                           feature.base_index + len(feature.app_tags))]
-            if loss_method == 'multi':
-                raise NotImplementedError()  # TODO implementation
-            elif loss_method == 'hierarchy':
+            if loss_method == 'hierarchy':
                 curr = feature.base_index
                 tag_indexes = [curr]
                 while result.tag_logits[1][curr] in possible_values and curr != 0\
@@ -804,9 +757,7 @@ def write_predictions(loss_method, all_examples, all_features, all_results, n_be
             for tag_index in tag_indexes:
                 if tag_index == 0:
                     continue
-                if loss_method == 'multi':
-                    raise NotImplementedError()
-                elif loss_method == 'hierarchy':
+                if loss_method == 'hierarchy':
                     tag_logit = result.tag_logits[0][tag_index]  # TODO not reasonable yet
                 else:
                     tag_logit = result.tag_logits[tag_index]
@@ -1094,6 +1045,8 @@ def form_tree_mask(app, tree, separate=False):
             if curr not in app:
                 continue
             curr = app.index(curr)
+            if len(path) > 0:
+                children[path[-1], curr] = 1
             for par in path:
                 if separate:
                     adj_up[curr, par] = 1
@@ -1106,6 +1059,7 @@ def form_tree_mask(app, tree, separate=False):
             path.pop()
 
     path = []
+    children = np.zeros((len(app), len(app)), dtype=np.int)
     if separate:
         adj_up = np.zeros((len(app), len(app)), dtype=np.int)
         adj_down = np.zeros((len(app), len(app)), dtype=np.int)
@@ -1115,7 +1069,7 @@ def form_tree_mask(app, tree, separate=False):
         adj_up[:, 0] = 1
         adj_down[0] = 1
         _unit(tree)
-        return adj_up, adj_down
+        return adj_up, adj_down, children
     else:
         adj = np.zeros((len(app), len(app)), dtype=np.int)
         ind = np.diag_indices_from(adj)
@@ -1123,4 +1077,4 @@ def form_tree_mask(app, tree, separate=False):
         adj[:, 0] = 1
         adj[ind] = 1
         _unit(tree)
-        return adj
+        return adj, children

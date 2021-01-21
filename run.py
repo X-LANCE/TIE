@@ -171,8 +171,8 @@ def train(args, train_dataset, model, tokenizer):
                       'start_positions': batch[4],
                       'end_positions'  : batch[5],
                       'tag_depth'      : batch[6],
-                      'base_index'     : batch[-3],
-                      'gat_mask'       : batch[-2],
+                      'gat_mask'       : batch[-3],
+                      'children'       : batch[-2],
                       'tag_to_tok'     : batch[-1]}
             outputs = model(**inputs)
             loss = args.loss_gamma * outputs[0] + outputs[1]
@@ -267,8 +267,8 @@ def evaluate(args, model, tokenizer, prefix="", write_pred=True):
                       'attention_mask' : batch[1],
                       'token_type_ids' : batch[2],
                       'tag_depth'      : batch[4],
-                      'base_index'     : batch[-3],
-                      'gat_mask'       : batch[-2],
+                      'gat_mask'       : batch[-3],
+                      'children'       : batch[-2],
                       'tag_to_tok'     : batch[-1]}
             feature_indices = batch[3]
             outputs = model(**inputs)
@@ -542,7 +542,7 @@ def main():
     parser.add_argument('--server_ip', type=str, default='', help="Can be used for distant debugging.")
     parser.add_argument('--server_port', type=str, default='', help="Can be used for distant debugging.")
 
-    parser.add_argument('--method', type=str, default="base", choices=['base', 'init_direct', 'init_child'])
+    parser.add_argument('--method', type=str, default="base", choices=['base', 'init_direct'])
     parser.add_argument('--enforce', action='store_true')
     parser.add_argument('--sample_size', type=int, default=None)
     parser.add_argument('--max_tag_length', type=int, default=384)
@@ -559,7 +559,7 @@ def main():
     parser.add_argument('--evaluate_split', type=str, default='dev', choices=['dev', 'test'])
     parser.add_argument('--max_depth_embeddings', type=str, default=None,
                         help='Set to the max depth embedding for node if want to use the position embeddings')
-    parser.add_argument('--loss_method', type=str, default='base', choices=['base', 'soft', 'multi', 'hierarchy'])
+    parser.add_argument('--loss_method', type=str, default='base', choices=['base', 'soft', 'hierarchy'])
     parser.add_argument('--soft_remain', type=float, default=0.8)
     parser.add_argument('--soft_decay', type=float, default=0.5)
     parser.add_argument('--loss_gamma', type=float, default=1)

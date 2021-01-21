@@ -97,8 +97,6 @@ class StrucDataset(Dataset):
     def __getitem__(self, index):
         output = [tensor[index] for tensor in self.tensors]
 
-        output.append(self.base_index[index])
-
         tag_to_token_index = self.tag2tok[index]
         app_tags = self.gat_mask[0][index]
         example_index = self.gat_mask[1][index]
@@ -109,12 +107,20 @@ class StrucDataset(Dataset):
         temp = torch.tensor(form_tree_mask(app_tags, html_tree, separate=self.separate))
         if self.separate:  # TODO multiple mask and variable total head number implementation
             gat_mask = gat_mask.unsqueeze(0).repeat(2, 1, 1)
-            gat_mask[0, base:base + len(app_tags), base:base + len(app_tags)] = temp[0]
-            gat_mask[1, base:base + len(app_tags), base:base + len(app_tags)] = temp[1]
+            gat_mask[0, base:base + len(app_tags), base:base + len(app_tags)] = torch.tensor(temp[0])
+            gat_mask[1, base:base + len(app_tags), base:base + len(app_tags)] = torch.tensor(temp[1])
             gat_mask.repeat(6, 1, 1)
+            tree_children = torch.tensor(temp[2])
         else:
-            gat_mask[base:base + len(app_tags), base:base + len(app_tags)] = temp
+            gat_mask[base:base + len(app_tags), base:base + len(app_tags)] = torch.tensor(temp[0])
+            tree_children = torch.tensor(temp[1])
         output.append(gat_mask)
+
+        children = torch.zeros((self.shape[0], self.shape[0]), dtype=torch.long)
+        tree_children[tree_children.sum(dim=1) == 0, 0] = 1
+        children[base:base + len(app_tags), base:base + len(app_tags)] = tree_children
+        children[base, 0] = 1
+        output.append(children)
 
         pooling_matrix = np.zeros(self.shape, dtype=np.double)
         for i in range(len(tag_to_token_index)):
@@ -133,6 +139,8 @@ class GraphHtmlConfig(PretrainedConfig):
     def __init__(self,
                  args,
                  **kwargs):
+        self.hidden_size = kwargs.pop("hidden_size", None)
+        self.max_position_embeddings = kwargs.pop("max_position_embeddings", None)
         super().__init__(**kwargs)
         self.method = args.method
         self.model_type = args.model_type
@@ -152,15 +160,10 @@ class Link(nn.Module):
         if self.add_position_embeddings:
             self.depth_embeddings = nn.Embedding(config.max_depth_embeddings, config.hidden_size, padding_idx=0)
 
-    def forward(self, inputs, tag_to_token, gat_mask, tag_depth):
+    def forward(self, inputs, tag_to_token, tag_depth):
         assert tag_to_token.dim() == 3
         modified_tag2token = self.deduce_direct_string(tag_to_token)
-        modified_gat_mask = self.deduce_child(gat_mask)
         outputs = torch.matmul(modified_tag2token, inputs)
-        if self.method == 'init_child':
-            for i in range(outputs.size(1) - 1, -1, -1):
-                outputs[:, i] = torch.matmul(modified_gat_mask[:, i].unsqueeze(dim=1).to(torch.float),
-                                             outputs).squeeze(dim=1)
 
         sequential_ids = self.sequential_ids[:, :inputs.size(1)]
         sequential_embeddings = self.sequential_embeddings(sequential_ids)
@@ -168,10 +171,11 @@ class Link(nn.Module):
         if self.add_position_embeddings:
             depth_embeddings = self.depth_embeddings(tag_depth)
             outputs = outputs + depth_embeddings
-        return outputs, modified_gat_mask
+
+        return outputs  # , self.deduce_child(gat_mask)
 
     def deduce_direct_string(self, tag_to_token):
-        if self.method not in ['init_direct', 'init_child']:
+        if self.method != 'init_direct':
             return tag_to_token
         temp = torch.zeros_like(tag_to_token)
         temp[tag_to_token > 0] = 1
@@ -184,22 +188,19 @@ class Link(nn.Module):
             temp[:, i] /= s
         return temp
 
-    def deduce_child(self, gat_mask):
-        if self.method != 'init_child' and self.loss_method != 'hierarchy':
-            return None
-        assert gat_mask.dim() == 3
-        child = deepcopy(gat_mask)
-        l = gat_mask.size(1)
-        for i in range(l):
-            c = child[:, i]
-            for j in range(i + 1, l):
-                temp = deepcopy(child[:, j])
-                temp[:, j] = 0
-                temp = c[:, j].unsqueeze(dim=1) * temp
-                c = ((c - temp) > 0).to(child.dtype)
-            c[:, i] = 1
-            child[:, i] = c / c.sum(dim=1, keepdim=True)
-        return child
+    # def deduce_child(self, gat_mask):
+    #     if self.loss_method != 'hierarchy':
+    #         return None
+    #     assert gat_mask.dim() == 3
+    #     child = deepcopy(gat_mask)
+    #     l = gat_mask.size(1)
+    #     for i in range(l):
+    #         child[:, i, i] = 0
+    #     for i in range(l):
+    #         for j in range(i + 1, l):
+    #             temp = child[:, j, j].unsqueeze(dim=1) * child[:, j]
+    #             child[:, i] = (child[:, i] - temp) > 0
+    #     return child
 
 
 class GraphHtmlBert(BertPreTrainedModel):
@@ -219,14 +220,11 @@ class GraphHtmlBert(BertPreTrainedModel):
         self.link = Link(self.method, config)
         self.num_gat_layers = config.num_hidden_layers
         self.gat = BertEncoder(config)
-        self.qa_outputs = PTMForQA.qa_outputs
+        self.qa_outputs = nn.Linear(config.hidden_size, 2)
         self.hidden_size = config.hidden_size
         if self.loss_method == 'hierarchy':
             self.gat_outputs = nn.Linear(config.hidden_size, config.hidden_size * 2)
             self.stop_margin = torch.nn.Parameter(torch.randn(1, dtype=torch.float), requires_grad=True)
-        elif self.loss_method == 'multi':
-            self.gat_outputs = nn.Linear(config.hidden_size, 2)
-            self.stop_margin = None
         else:
             self.gat_outputs = nn.Linear(config.hidden_size, 1)
             self.stop_margin = None
@@ -236,6 +234,7 @@ class GraphHtmlBert(BertPreTrainedModel):
             input_ids,
             attention_mask=None,
             gat_mask=None,
+            children=None,
             token_type_ids=None,
             position_ids=None,
             head_mask=None,
@@ -244,7 +243,6 @@ class GraphHtmlBert(BertPreTrainedModel):
             end_positions=None,
             answer_tid=None,
             tag_to_tok=None,
-            base_index=None,
             tag_depth=None,
     ):
 
@@ -265,7 +263,7 @@ class GraphHtmlBert(BertPreTrainedModel):
         end_logits = end_logits.squeeze(-1)
         outputs = (start_logits, end_logits,) + outputs
 
-        gat_inputs, children = self.link(sequence_output, tag_to_tok, gat_mask, tag_depth)
+        gat_inputs = self.link(sequence_output, tag_to_tok, tag_depth)
         if head_mask is None:
             head_mask = [None] * self.num_gat_layers
         if gat_mask.dim() == 3:
@@ -279,18 +277,12 @@ class GraphHtmlBert(BertPreTrainedModel):
         tag_logits = self.gat_outputs(final_outputs)
         tag_logits = tag_logits.squeeze(-1)
         if self.loss_method == 'hierarchy':
-            for ind in range(children.size(-1)):
-                children[:, ind, ind] = 0
-            for ind in range(children.size(0)):
-                children[ind, base_index[ind], 0] = 1
-            children[children > 0] = 1
             tag_logits = torch.matmul(tag_logits[:, :, :self.hidden_size],
                                       tag_logits[:, :, self.hidden_size:].permute(0, 2, 1))
             tag_logits = tag_logits * children
             b, t, _ = tag_logits.size()
             tag_logits = torch.cat([tag_logits,
                                     self.stop_margin.unsqueeze(0).unsqueeze(0).repeat((b, t, 1))], dim=2)
-        if self.loss_method in ['hierarchy', 'multi']:
             prob, index = tag_logits.max(dim=2)
             outputs = (prob, index,) + outputs
         outputs = (tag_logits,) + outputs
@@ -321,11 +313,6 @@ class GraphHtmlBert(BertPreTrainedModel):
                 loss_fct = torch.nn.CrossEntropyLoss(ignore_index=ignored_index)
             elif self.loss_method == 'soft':
                 loss_fct = torch.nn.KLDivLoss()
-            elif self.loss_method == 'multi':
-                loss_fct = torch.nn.CrossEntropyLoss(ignore_index=ignored_index)
-                b, t = answer_tid.size()
-                tag_logits = tag_logits.reshape((b * t, -1))
-                answer_tid = answer_tid.reshape((b * t))
             elif self.loss_method == 'hierarchy':
                 loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-1)
                 b, t = answer_tid.size()
