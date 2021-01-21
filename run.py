@@ -639,7 +639,7 @@ def main():
     if args.do_train:
         train_dataset = load_and_cache_examples(args, tokenizer, evaluate=False, split='train')
         model.resize_token_embeddings(len(tokenizer))
-        if args.resume_from_HPLM is not None:
+        if args.resume_from_PLM is not None:
             model.load_state_dict(torch.load(os.path.join(args.resume_from_PLM, 'pytorch_model.bin')))
             if args.model_type == 'bert':
                 tokenizer = BertTokenizer.from_pretrained(args.resume_from_PLM, do_lower_case=args.do_lower_case)
