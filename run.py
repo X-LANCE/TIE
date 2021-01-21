@@ -564,6 +564,8 @@ def main():
     parser.add_argument('--soft_decay', type=float, default=0.5)
     parser.add_argument('--loss_gamma', type=float, default=1)
     parser.add_argument('--separate_mask', action='store_true')
+    parser.add_argument('--resume_from_HPLM', type=str, default=None,
+                        help='the path of the folder contains the state dict file and the tokenizer')
     args = parser.parse_args()
 
     if os.path.exists(args.output_dir) and os.listdir(
@@ -636,8 +638,16 @@ def main():
     # Training
     if args.do_train:
         train_dataset = load_and_cache_examples(args, tokenizer, evaluate=False, split='train')
-        tokenizer.save_pretrained(args.output_dir)
         model.resize_token_embeddings(len(tokenizer))
+        if args.resume_from_HPLM is not None:
+            model.load_state_dict(torch.load(os.path.join(args.resume_from_HPLM, 'pytorch_model.bin')))
+            if args.model_type == 'bert':
+                tokenizer = BertTokenizer.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case)
+            elif args.model_type == 'electra':
+                tokenizer = ElectraTokenizer.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case)
+            else:
+                raise NotImplementedError()
+        tokenizer.save_pretrained(args.output_dir)
         html_config = GraphHtmlConfig(args, **config.__dict__)
         model = GraphHtmlBert(model, html_config)
         if args.resume is not None:
@@ -676,8 +686,6 @@ def main():
 
         if args.model_type == 'bert':
             tokenizer = BertTokenizer.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case)
-        elif args.model_type == 'albert':
-            tokenizer = AlbertTokenizer.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case)
         elif args.model_type == 'electra':
             tokenizer = ElectraTokenizer.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case)
         else:
