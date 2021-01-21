@@ -239,8 +239,7 @@ def train(args, train_dataset, model, tokenizer):
 
 
 def evaluate(args, model, tokenizer, prefix="", write_pred=True):
-    dataset, examples, features = load_and_cache_examples(args, tokenizer, evaluate=True,
-                                                          output_examples=True, split=args.evaluate_split)
+    dataset, examples, features = load_and_cache_examples(args, tokenizer, evaluate=True, split=args.evaluate_split)
 
     if not os.path.exists(args.output_dir) and args.local_rank in [-1, 0]:
         os.makedirs(args.output_dir)
@@ -271,11 +270,11 @@ def evaluate(args, model, tokenizer, prefix="", write_pred=True):
                       'base_index'     : batch[-3],
                       'gat_mask'       : batch[-2],
                       'tag_to_tok'     : batch[-1]}
-            example_indices = batch[3]
+            feature_indices = batch[3]
             outputs = model(**inputs)
 
-        for i, example_index in enumerate(example_indices):
-            eval_feature = features[example_index.item()]
+        for i, feature_index in enumerate(feature_indices):
+            eval_feature = features[feature_index.item()]
             unique_id = int(eval_feature.unique_id)
             if args.loss_method in ['hierarchy', 'multi']:
                 result = RawResult(unique_id=unique_id,
@@ -316,7 +315,7 @@ def evaluate(args, model, tokenizer, prefix="", write_pred=True):
     return results
 
 
-def load_and_cache_examples(args, tokenizer, evaluate=False, output_examples=False, split='train'):
+def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
     if args.local_rank not in [-1, 0] and not evaluate:
         torch.distributed.barrier()  # Make sure only the first process in distributed training process the dataset,
         # and the others will use the cache
@@ -337,15 +336,14 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, output_examples=Fal
             features = None
         else:
             features = torch.load(cached_features_file)
-        if output_examples or not evaluate:
-            examples, tag_list = read_squad_examples(input_file=input_file,
-                                                     is_training=not evaluate,
-                                                     tokenizer=tokenizer,
-                                                     simplify=True)
-            if not evaluate:
-                tag_list = list(tag_list)
-                tag_list.sort()
-                tokenizer.add_tokens(tag_list)
+        examples, tag_list = read_squad_examples(input_file=input_file,
+                                                 is_training=not evaluate,
+                                                 tokenizer=tokenizer,
+                                                 simplify=True)
+        if not evaluate:
+            tag_list = list(tag_list)
+            tag_list.sort()
+            tokenizer.add_tokens(tag_list)
     else:
         logger.info("Creating features from dataset file at %s", input_file)
 
@@ -403,9 +401,9 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, output_examples=Fal
         raise SystemError('Mission complete!')
 
     if args.separate_read and not evaluate:
-        dataset = SubDataset(evaluate, total, cached_features_file, 2,
-                             (args.max_tag_length, args.max_seq_length), args.loss_method)
-        if output_examples:
+        dataset = SubDataset(examples, evaluate, total, cached_features_file, 2,
+                             (args.max_tag_length, args.max_seq_length), args.loss_method, args.separete_mask)
+        if evaluate:
             dataset = (dataset, examples, features)
         return dataset
 
@@ -414,16 +412,18 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, output_examples=Fal
     all_input_mask = torch.tensor([f.input_mask for f in features], dtype=torch.long)
     all_segment_ids = torch.tensor([f.segment_ids for f in features], dtype=torch.long)
     all_tag_depth = torch.tensor([f.depth for f in features], dtype=torch.long)
-    all_gat_mask = [f.gat_mask for f in features]
+    all_app_tags = [f.app_tags for f in features]
+    all_example_index = [f.example_index for f in features]
+    all_html_trees = [e.html_tree for e in examples]
     all_base_index = [f.base_index for f in features]
     all_tag_to_token = [f.tag_to_token_index for f in features]
 
     if evaluate:
-        all_example_index = torch.arange(all_input_ids.size(0), dtype=torch.long)
-        dataset = StrucDataset(all_input_ids, all_input_mask, all_segment_ids, all_example_index, all_tag_depth,
-                               gat_mask=all_gat_mask, base_index=all_base_index,
+        all_feature_index = torch.arange(all_input_ids.size(0), dtype=torch.long)
+        dataset = StrucDataset(all_input_ids, all_input_mask, all_segment_ids, all_feature_index, all_tag_depth,
+                               gat_mask=(all_app_tags, all_example_index, all_html_trees), base_index=all_base_index,
                                tag2tok=all_tag_to_token, shape=(args.max_tag_length, args.max_seq_length),
-                               training=False)
+                               training=False, separate=args.separete_mask)
     else:
         all_answer_tid = torch.tensor([f.answer_tid for f in features],
                                       dtype=torch.long if args.loss_method != 'soft' else torch.float)
@@ -431,11 +431,11 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, output_examples=Fal
         all_end_positions = torch.tensor([f.end_position for f in features], dtype=torch.long)
         dataset = StrucDataset(all_input_ids, all_input_mask, all_segment_ids,
                                all_answer_tid, all_start_positions, all_end_positions, all_tag_depth,
-                               gat_mask=all_gat_mask, base_index=all_base_index,
+                               gat_mask=(all_app_tags, all_example_index, all_html_trees), base_index=all_base_index,
                                tag2tok=all_tag_to_token, shape=(args.max_tag_length, args.max_seq_length),
-                               training=True)
+                               training=True, separate=args.separete_mask)
 
-    if output_examples:
+    if evaluate:
         dataset = (dataset, examples, features)
     return dataset
 
@@ -563,6 +563,7 @@ def main():
     parser.add_argument('--soft_remain', type=float, default=0.8)
     parser.add_argument('--soft_decay', type=float, default=0.5)
     parser.add_argument('--loss_gamma', type=float, default=1)
+    parser.add_argument('--separate_mask', action='store_true')
     args = parser.parse_args()
 
     if os.path.exists(args.output_dir) and os.listdir(
@@ -634,7 +635,7 @@ def main():
 
     # Training
     if args.do_train:
-        train_dataset = load_and_cache_examples(args, tokenizer, evaluate=False, output_examples=False, split='train')
+        train_dataset = load_and_cache_examples(args, tokenizer, evaluate=False, split='train')
         tokenizer.save_pretrained(args.output_dir)
         model.resize_token_embeddings(len(tokenizer))
         html_config = GraphHtmlConfig(args, **config.__dict__)

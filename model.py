@@ -9,18 +9,24 @@ from transformers import PretrainedConfig
 from torch.utils.data import Dataset
 import numpy as np
 
+from utils import form_tree_mask
+
 
 class SubDataset(Dataset):
-    def __init__(self, evaluate, total, base_name, num_parts, shape, loss_method):
+    def __init__(self, examples, evaluate, total, base_name, num_parts, shape, loss_method, separate):
+        self.examples = examples
         self.evaluate = evaluate
         self.total = total
         self.base_name = base_name
         self.num_parts = num_parts
         self.shape = shape
         self.loss_method = loss_method
+        self.separate = separate
+
         self.current_part = 1
         self.passed_index = 0
         self.dataset = None
+        self.all_html_trees = [e.html_tree for e in self.examples]
         self._read_data()
 
     def _read_data(self):
@@ -30,16 +36,17 @@ class SubDataset(Dataset):
         all_input_mask = torch.tensor([f.input_mask for f in features], dtype=torch.long)
         all_segment_ids = torch.tensor([f.segment_ids for f in features], dtype=torch.long)
         all_tag_depth = torch.tensor([f.depth for f in features], dtype=torch.long)
-        all_gat_mask = [f.gat_mask for f in features]
+        all_app_tags = [f.app_tags for f in features]
+        all_example_index = [f.example_index for f in features]
         all_base_index = [f.base_index for f in features]
         all_tag_to_token = [f.tag_to_token_index for f in features]
 
         if self.evaluate:
-            all_example_index = torch.arange(all_input_ids.size(0), dtype=torch.long)
-            self.dataset = StrucDataset(all_input_ids, all_input_mask, all_segment_ids, all_example_index,
-                                        all_tag_depth, gat_mask=all_gat_mask, base_index=all_base_index,
-                                        tag2tok=all_tag_to_token, shape=self.shape,
-                                        training=False)
+            all_feature_index = torch.arange(all_input_ids.size(0), dtype=torch.long)
+            self.dataset = StrucDataset(all_input_ids, all_input_mask, all_segment_ids, all_feature_index,
+                                        all_tag_depth, gat_mask=(all_app_tags, all_example_index, self.all_html_trees),
+                                        base_index=all_base_index, tag2tok=all_tag_to_token, shape=self.shape,
+                                        training=False, separate=self.separate)
         else:
             all_answer_tid = torch.tensor([f.answer_tid for f in features],
                                           dtype=torch.long if self.loss_method != 'soft' else torch.float)
@@ -47,9 +54,9 @@ class SubDataset(Dataset):
             all_end_positions = torch.tensor([f.end_position for f in features], dtype=torch.long)
             self.dataset = StrucDataset(all_input_ids, all_input_mask, all_segment_ids,
                                         all_answer_tid, all_start_positions, all_end_positions, all_tag_depth,
-                                        gat_mask=all_gat_mask, base_index=all_base_index,
-                                        tag2tok=all_tag_to_token, shape=self.shape,
-                                        training=True)
+                                        gat_mask=(all_app_tags, all_example_index, self.all_html_trees),
+                                        base_index=all_base_index, tag2tok=all_tag_to_token, shape=self.shape,
+                                        training=True, separate=self.separate)
 
     def __getitem__(self, index):
         if index - self.passed_index < 0:
@@ -75,7 +82,8 @@ class StrucDataset(Dataset):
         *tensors (Tensor): tensors that have the same size of the first dimension.
     """
 
-    def __init__(self, *tensors, gat_mask=None, base_index=None, tag2tok=None, shape=None, training=True):
+    def __init__(self, *tensors, gat_mask=None, base_index=None, tag2tok=None,
+                 shape=None, training=True, separate=False):
         tensors = tuple(tensor for tensor in tensors if tensor is not None)
         assert all(len(tensors[0]) == len(tensor) for tensor in tensors)
         self.tensors = tensors
@@ -84,17 +92,30 @@ class StrucDataset(Dataset):
         self.tag2tok = tag2tok
         self.shape = shape
         self.training = training
+        self.separate = separate
 
     def __getitem__(self, index):
         output = [tensor[index] for tensor in self.tensors]
 
         output.append(self.base_index[index])
 
-        gat_mask = np.load(self.gat_mask[index])
-        gat_mask = torch.tensor(gat_mask, dtype=torch.long)
+        tag_to_token_index = self.tag2tok[index]
+        app_tags = self.gat_mask[0][index]
+        example_index = self.gat_mask[1][index]
+        html_tree = self.gat_mask[2][example_index]
+        base = self.base_index[index]
+        gat_mask = torch.zeros((self.shape[0], self.shape[0]), dtype=torch.long)
+        gat_mask[:, :len(tag_to_token_index)] = 1
+        temp = torch.tensor(form_tree_mask(app_tags, html_tree, separate=self.separate))
+        if self.separate:  # TODO multiple mask and variable total head number implementation
+            gat_mask = gat_mask.unsqueeze(0).repeat(2, 1, 1)
+            gat_mask[0, base:base + len(app_tags), base:base + len(app_tags)] = temp[0]
+            gat_mask[1, base:base + len(app_tags), base:base + len(app_tags)] = temp[1]
+            gat_mask.repeat(6, 1, 1)
+        else:
+            gat_mask[base:base + len(app_tags), base:base + len(app_tags)] = temp
         output.append(gat_mask)
 
-        tag_to_token_index = self.tag2tok[index]
         pooling_matrix = np.zeros(self.shape, dtype=np.double)
         for i in range(len(tag_to_token_index)):
             temp = tag_to_token_index[i]
@@ -245,7 +266,12 @@ class GraphHtmlBert(BertPreTrainedModel):
         gat_inputs, children = self.link(sequence_output, tag_to_tok, gat_mask, tag_depth)
         if head_mask is None:
             head_mask = [None] * self.num_gat_layers
-        extended_gat_mask = gat_mask[:, None, :, :]
+        if gat_mask.dim() == 3:
+            extended_gat_mask = gat_mask[:, None, :, :]
+        elif gat_mask.dim() == 4:
+            extended_gat_mask = gat_mask
+        else:
+            raise ValueError('Wrong dim num for gat_mask, whose size is {}'.format(gat_mask.size()))
         gat_outputs = self.gat(gat_inputs, attention_mask=extended_gat_mask, head_mask=head_mask)
         final_outputs = gat_outputs[0]
         tag_logits = self.gat_outputs(final_outputs)

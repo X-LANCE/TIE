@@ -1083,3 +1083,44 @@ def _compute_softmax(scores):
     for score in exp_scores:
         probs.append(score / total_sum)
     return probs
+
+
+def form_tree_mask(app, tree, separate=False):
+    def _unit(node):
+        for ch in node.contents:
+            if type(ch) != bs4.element.Tag:
+                continue
+            curr = int(ch['tid'])
+            if curr not in app:
+                continue
+            curr = app.index(curr)
+            for par in path:
+                if separate:
+                    adj_up[curr, par] = 1
+                    adj_down[par, curr] = 1
+                else:
+                    adj[par, curr] = 1
+                    adj[curr, par] = 1
+            path.append(curr)
+            _unit(ch)
+            path.pop()
+
+    path = []
+    if separate:
+        adj_up = np.zeros((len(app), len(app)), dtype=np.int)
+        adj_down = np.zeros((len(app), len(app)), dtype=np.int)
+        ind = np.diag_indices_from(adj_up)
+        adj_up[ind] = 1
+        adj_down[ind] = 1
+        adj_up[:, 0] = 1
+        adj_down[0] = 1
+        _unit(tree)
+        return adj_up, adj_down
+    else:
+        adj = np.zeros((len(app), len(app)), dtype=np.int)
+        ind = np.diag_indices_from(adj)
+        adj[0] = 1
+        adj[:, 0] = 1
+        adj[ind] = 1
+        _unit(tree)
+        return adj
