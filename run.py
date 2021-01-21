@@ -402,7 +402,7 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
 
     if args.separate_read and not evaluate:
         dataset = SubDataset(examples, evaluate, total, cached_features_file, 2,
-                             (args.max_tag_length, args.max_seq_length), args.loss_method, args.separete_mask)
+                             (args.max_tag_length, args.max_seq_length), args.loss_method, args.separate_mask)
         if evaluate:
             dataset = (dataset, examples, features)
         return dataset
@@ -423,7 +423,7 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
         dataset = StrucDataset(all_input_ids, all_input_mask, all_segment_ids, all_feature_index, all_tag_depth,
                                gat_mask=(all_app_tags, all_example_index, all_html_trees), base_index=all_base_index,
                                tag2tok=all_tag_to_token, shape=(args.max_tag_length, args.max_seq_length),
-                               training=False, separate=args.separete_mask)
+                               training=False, separate=args.separate_mask)
     else:
         all_answer_tid = torch.tensor([f.answer_tid for f in features],
                                       dtype=torch.long if args.loss_method != 'soft' else torch.float)
@@ -433,7 +433,7 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
                                all_answer_tid, all_start_positions, all_end_positions, all_tag_depth,
                                gat_mask=(all_app_tags, all_example_index, all_html_trees), base_index=all_base_index,
                                tag2tok=all_tag_to_token, shape=(args.max_tag_length, args.max_seq_length),
-                               training=True, separate=args.separete_mask)
+                               training=True, separate=args.separate_mask)
 
     if evaluate:
         dataset = (dataset, examples, features)
