@@ -109,7 +109,7 @@ class StrucDataset(Dataset):
             gat_mask = gat_mask.unsqueeze(0).repeat(2, 1, 1)
             gat_mask[0, base:base + len(app_tags), base:base + len(app_tags)] = torch.tensor(temp[0])
             gat_mask[1, base:base + len(app_tags), base:base + len(app_tags)] = torch.tensor(temp[1])
-            gat_mask.repeat(6, 1, 1)
+            gat_mask = gat_mask.repeat(6, 1, 1)
             tree_children = torch.tensor(temp[2])
         else:
             gat_mask[base:base + len(app_tags), base:base + len(app_tags)] = torch.tensor(temp[0])
@@ -223,7 +223,7 @@ class GraphHtmlBert(BertPreTrainedModel):
         self.qa_outputs = nn.Linear(config.hidden_size, 2)
         self.hidden_size = config.hidden_size
         if self.loss_method == 'hierarchy':
-            self.gat_outputs = nn.Linear(config.hidden_size, config.hidden_size * 2)
+            self.gat_outputs = nn.Linear(config.hidden_size, config.hidden_size)
             self.stop_margin = torch.nn.Parameter(torch.randn(1, dtype=torch.float), requires_grad=True)
         else:
             self.gat_outputs = nn.Linear(config.hidden_size, 1)
@@ -277,8 +277,8 @@ class GraphHtmlBert(BertPreTrainedModel):
         tag_logits = self.gat_outputs(final_outputs)
         tag_logits = tag_logits.squeeze(-1)
         if self.loss_method == 'hierarchy':
-            tag_logits = torch.matmul(tag_logits[:, :, :self.hidden_size],
-                                      tag_logits[:, :, self.hidden_size:].permute(0, 2, 1))
+            tag_logits = torch.matmul(tag_logits[:, :, :self.hidden_size // 2],
+                                      tag_logits[:, :, self.hidden_size // 2:].permute(0, 2, 1))
             tag_logits = tag_logits * children
             b, t, _ = tag_logits.size()
             tag_logits = torch.cat([tag_logits,
