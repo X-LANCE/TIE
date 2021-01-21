@@ -179,7 +179,9 @@ class Link(nn.Module):
             temp[:, i] -= temp[:, i + 1:].sum(dim=1)
         temp[temp <= 0] = 0.
         for i in range(tag_to_token.size(1)):
-            temp[:, i] /= temp[:, i].sum(dim=1, keepdim=True)
+            s = temp[:, i].sum(dim=1, keepdim=True)
+            s[s == 0] = 1
+            temp[:, i] /= s
         return temp
 
     def deduce_child(self, gat_mask):
