@@ -203,6 +203,12 @@ class Link(nn.Module):
     #     return child
 
 
+def convert_mask_to_reality(mask, dtype=torch.float):
+    mask = mask.to(dtype=dtype)
+    mask = (1.0 - mask) * -10000.0
+    return mask
+
+
 class GraphHtmlBert(BertPreTrainedModel):
     def __init__(self, PTMForQA, config: GraphHtmlConfig):
         super(GraphHtmlBert, self).__init__(config)
@@ -272,6 +278,7 @@ class GraphHtmlBert(BertPreTrainedModel):
             extended_gat_mask = gat_mask
         else:
             raise ValueError('Wrong dim num for gat_mask, whose size is {}'.format(gat_mask.size()))
+        extended_gat_mask = convert_mask_to_reality(extended_gat_mask)
         gat_outputs = self.gat(gat_inputs, attention_mask=extended_gat_mask, head_mask=head_mask)
         final_outputs = gat_outputs[0]
         tag_logits = self.gat_outputs(final_outputs)
@@ -279,7 +286,8 @@ class GraphHtmlBert(BertPreTrainedModel):
         if self.loss_method == 'hierarchy':
             tag_logits = torch.matmul(tag_logits[:, :, :self.hidden_size // 2],
                                       tag_logits[:, :, self.hidden_size // 2:].permute(0, 2, 1))
-            tag_logits = tag_logits * children
+            children = convert_mask_to_reality(children)
+            tag_logits = tag_logits + children
             b, t, _ = tag_logits.size()
             tag_logits = torch.cat([tag_logits,
                                     self.stop_margin.unsqueeze(0).unsqueeze(0).repeat((b, t, 1))], dim=2)
@@ -312,7 +320,7 @@ class GraphHtmlBert(BertPreTrainedModel):
             if self.loss_method == 'base':
                 loss_fct = torch.nn.CrossEntropyLoss(ignore_index=ignored_index)
             elif self.loss_method == 'soft':
-                loss_fct = torch.nn.KLDivLoss()
+                loss_fct = torch.nn.KLDivLoss(reduction='batchmean')
             elif self.loss_method == 'hierarchy':
                 loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-1)
                 b, t = answer_tid.size()
@@ -325,3 +333,4 @@ class GraphHtmlBert(BertPreTrainedModel):
 
         return outputs
         # (loss), (total_loss), tag_logits, (prob, index), start_logits, end_logits, (hidden_states), (attentions)
+

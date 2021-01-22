@@ -542,7 +542,7 @@ def main():
     parser.add_argument('--server_ip', type=str, default='', help="Can be used for distant debugging.")
     parser.add_argument('--server_port', type=str, default='', help="Can be used for distant debugging.")
 
-    parser.add_argument('--method', type=str, default="base", choices=['base', 'init_direct'])
+    parser.add_argument('--method', type=str, default="init_direct", choices=['base', 'init_direct'])
     parser.add_argument('--enforce', action='store_true')
     parser.add_argument('--sample_size', type=int, default=None)
     parser.add_argument('--max_tag_length', type=int, default=384)
