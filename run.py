@@ -326,7 +326,9 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
         split,
         list(filter(None, args.model_name_or_path.split('/'))).pop(),
         str(args.max_seq_length)))
-    cached_features_file = '{}_{}'.format(base_cached_features_file, args.loss_method)
+    cached_features_file = '{}_{}'.format(base_cached_features_file,
+                                          args.loss_method if args.loss_method != 'soft'
+                                          else '{}_{}'.format(args.soft_remain, args.soft_decay))
     gat_cached_features_file = base_cached_features_file + '_gat'
 
     if os.path.exists(cached_features_file) and not args.overwrite_cache and not args.enforce:

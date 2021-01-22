@@ -395,7 +395,7 @@ def convert_examples_to_features(examples, tokenizer, loss_method, max_seq_lengt
                                  cls_token='[CLS]', sep_token='[SEP]', pad_token=0,
                                  sequence_a_segment_id=0, sequence_b_segment_id=1,
                                  cls_token_segment_id=0, pad_token_segment_id=0,
-                                 sample_size=None, save_dir='./', no_save=False):
+                                 sample_size=None):
     """Loads a data file into a list of `InputBatch`s."""
 
     def label_generating(html_tree, origin_answer_tid, app_tags, base):
@@ -411,10 +411,10 @@ def convert_examples_to_features(examples, tokenizer, loss_method, max_seq_lengt
                 marker[base] = 1 - soft_remain
                 path.append(base)
             else:
-                for p in list(tag.parents):
+                for p in tag.parents:
                     if type(p) == bs4.BeautifulSoup:
                         break
-                    if p['tid'] in app_tags:
+                    if int(p['tid']) in app_tags:
                         path.append(app_tags.index(p['tid']) + base)
                         marker[app_tags.index(p['tid']) + base] = t
                         t *= soft_decay

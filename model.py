@@ -1,5 +1,6 @@
 #!/usr/bin/python
 # -*- coding: utf-8 -*-
+import math
 from copy import deepcopy
 
 import torch
@@ -228,6 +229,7 @@ class GraphHtmlBert(BertPreTrainedModel):
         self.gat = BertEncoder(config)
         self.qa_outputs = nn.Linear(config.hidden_size, 2)
         self.hidden_size = config.hidden_size
+        self.scale = math.sqrt(self.hidden_size // 2)
         if self.loss_method == 'hierarchy':
             self.gat_outputs = nn.Linear(config.hidden_size, config.hidden_size)
             self.stop_margin = torch.nn.Parameter(torch.randn(1, dtype=torch.float), requires_grad=True)
@@ -286,6 +288,7 @@ class GraphHtmlBert(BertPreTrainedModel):
         if self.loss_method == 'hierarchy':
             tag_logits = torch.matmul(tag_logits[:, :, :self.hidden_size // 2],
                                       tag_logits[:, :, self.hidden_size // 2:].permute(0, 2, 1))
+            tag_logits = tag_logits / self.scale
             children = convert_mask_to_reality(children)
             tag_logits = tag_logits + children
             b, t, _ = tag_logits.size()
@@ -320,6 +323,7 @@ class GraphHtmlBert(BertPreTrainedModel):
             if self.loss_method == 'base':
                 loss_fct = torch.nn.CrossEntropyLoss(ignore_index=ignored_index)
             elif self.loss_method == 'soft':
+                tag_logits = torch.nn.functional.log_softmax(tag_logits, dim=1)
                 loss_fct = torch.nn.KLDivLoss(reduction='batchmean')
             elif self.loss_method == 'hierarchy':
                 loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-1)
