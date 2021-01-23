@@ -276,7 +276,7 @@ def evaluate(args, model, tokenizer, prefix="", write_pred=True):
         for i, feature_index in enumerate(feature_indices):
             eval_feature = features[feature_index.item()]
             unique_id = int(eval_feature.unique_id)
-            if args.loss_method in ['hierarchy', 'multi']:
+            if args.loss_method == 'hierarchy':
                 result = RawResult(unique_id=unique_id,
                                    tag_logits=(to_list(outputs[1][i]), to_list(outputs[2][i])),
                                    start_logits=to_list(outputs[3][i]),
