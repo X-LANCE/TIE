@@ -415,8 +415,8 @@ def convert_examples_to_features(examples, tokenizer, loss_method, max_seq_lengt
                     if type(p) == bs4.BeautifulSoup:
                         break
                     if int(p['tid']) in app_tags:
-                        path.append(app_tags.index(p['tid']) + base)
-                        marker[app_tags.index(p['tid']) + base] = t
+                        path.append(app_tags.index(int(p['tid'])) + base)
+                        marker[app_tags.index(int(p['tid'])) + base] = t
                         t *= soft_decay
                 temp = marker.sum() - 1
                 if temp != 0:

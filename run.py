@@ -375,9 +375,7 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
                                                 soft_remain=args.soft_remain,
                                                 soft_decay=args.soft_decay,
                                                 is_training=not evaluate,
-                                                sample_size=args.sample_size,
-                                                save_dir=gat_cached_features_file,
-                                                no_save=args.enforce)
+                                                sample_size=args.sample_size)
         if args.local_rank in [-1, 0] and not args.enforce:
             logger.info("Saving features into cached file %s", cached_features_file)
             torch.save(features, cached_features_file)
