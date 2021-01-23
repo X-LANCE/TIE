@@ -329,7 +329,6 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
     cached_features_file = '{}_{}'.format(base_cached_features_file,
                                           args.loss_method if args.loss_method != 'soft'
                                           else '{}_{}'.format(args.soft_remain, args.soft_decay))
-    gat_cached_features_file = base_cached_features_file + '_gat'
 
     if os.path.exists(cached_features_file) and not args.overwrite_cache and not args.enforce:
         logger.info("Loading features from cached file %s", cached_features_file)
@@ -363,8 +362,6 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
                                           tokenizer=tokenizer,
                                           simplify=False)
 
-        if not os.path.exists(gat_cached_features_file):
-            os.makedirs(gat_cached_features_file)
         features = convert_examples_to_features(examples=examples,
                                                 tokenizer=tokenizer,
                                                 loss_method=args.loss_method,
