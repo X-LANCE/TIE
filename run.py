@@ -278,7 +278,8 @@ def evaluate(args, model, tokenizer, prefix="", write_pred=True):
             unique_id = int(eval_feature.unique_id)
             if args.loss_method == 'hierarchy':
                 result = RawResult(unique_id=unique_id,
-                                   tag_logits=(to_list(outputs[1][i]), to_list(outputs[2][i])),
+                                   tag_logits={'prob': to_list(outputs[1][i]),
+                                               'index': to_list(outputs[2][i])},
                                    start_logits=to_list(outputs[3][i]),
                                    end_logits=to_list(outputs[4][i]))
             else:

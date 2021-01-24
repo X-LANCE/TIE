@@ -745,9 +745,9 @@ def write_predictions(loss_method, all_examples, all_features, all_results, n_be
             if loss_method == 'hierarchy':
                 curr = feature.base_index
                 tag_indexes = [curr]
-                while result.tag_logits[1][curr] in possible_values and curr != 0\
+                while result.tag_logits['index'][curr] in possible_values and curr != 0\
                         and len(tag_indexes) < len(feature.app_tags):
-                    curr = result.tag_logits[1][curr]
+                    curr = result.tag_logits['index'][curr]
                     tag_indexes.append(curr)
                 tag_indexes = tag_indexes[-n_best_tag_size:]
             else:
@@ -758,7 +758,7 @@ def write_predictions(loss_method, all_examples, all_features, all_results, n_be
                 if tag_index == 0:
                     continue
                 if loss_method == 'hierarchy':
-                    tag_logit = result.tag_logits[0][tag_index]  # TODO not reasonable yet
+                    tag_logit = result.tag_logits['prob'][tag_index]  # TODO not reasonable yet
                 else:
                     tag_logit = result.tag_logits[tag_index]
                 tag_id = feature.app_tags[tag_index - feature.base_index]

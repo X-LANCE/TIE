@@ -318,14 +318,16 @@ class GraphHtmlBert(BertPreTrainedModel):
         if answer_tid is not None:
             if len(answer_tid.size()) > 1:
                 answer_tid = answer_tid.squeeze(-1)
-            ignored_index = tag_logits.size(1)
-            answer_tid.clamp_(0, ignored_index)
             if self.loss_method == 'base':
+                ignored_index = tag_logits.size(1)
+                answer_tid.clamp_(0, ignored_index)
                 loss_fct = torch.nn.CrossEntropyLoss(ignore_index=ignored_index)
             elif self.loss_method == 'soft':
+                answer_tid.clamp_(0, 1)
                 tag_logits = torch.nn.functional.log_softmax(tag_logits, dim=1)
                 loss_fct = torch.nn.KLDivLoss(reduction='batchmean')
             elif self.loss_method == 'hierarchy':
+                answer_tid.clamp_(-1, tag_logits.size(1))
                 loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-1)
                 b, t = answer_tid.size()
                 tag_logits = tag_logits.reshape((b * t, -1))
