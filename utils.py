@@ -51,11 +51,9 @@ class SquadExample(object):
                  answer_tid=None,
                  start_position=None,
                  end_position=None,
-                 is_impossible=None,
                  tok_to_orig_index=None,
                  orig_to_tok_index=None,
                  all_doc_tokens=None,
-                 tok_to_tags_index=None,
                  tags_to_tok_index=None,
                  orig_tags=None,
                  tag_depth=None):
@@ -67,11 +65,9 @@ class SquadExample(object):
         self.answer_tid = answer_tid
         self.start_position = start_position
         self.end_position = end_position
-        self.is_impossible = is_impossible
         self.tok_to_orig_index = tok_to_orig_index
         self.orig_to_tok_index = orig_to_tok_index
         self.all_doc_tokens = all_doc_tokens
-        self.tok_to_tags_index = tok_to_tags_index
         self.tags_to_tok_index = tags_to_tok_index
         self.orig_tags = orig_tags
         self.tag_depth = tag_depth
@@ -87,8 +83,6 @@ class SquadExample(object):
         s += ", doc_tokens: [%s]" % (" ".join(self.doc_tokens))
         if self.answer_tid:
             s += ", answer_tid: %d" % self.answer_tid
-        if self.is_impossible:
-            s += ", is_impossible: %r" % self.is_impossible
         return s
 
 
@@ -208,15 +202,13 @@ def read_squad_examples(input_file, is_training, tokenizer, simplify=False):
 
     def word_to_tag_from_text(tokens, h):
         cnt, path = -1, []
-        w2t, t2w, tags = [], [], []
+        t2w, tags = [], []
         for ind in range(len(tokens) - 2):
             t = tokens[ind]
             if len(t) < 2:
-                w2t.append(path[-1])
                 continue
             if t[0] == '<' and t[-2] == '/':
                 cnt += 1
-                w2t.append(cnt)
                 tags.append(t)
                 t2w.append({'start': ind, 'end': ind})
                 continue
@@ -225,20 +217,16 @@ def read_squad_examples(input_file, is_training, tokenizer, simplify=False):
                 path.append(cnt)
                 tags.append(t)
                 t2w.append({'start': ind})
-            w2t.append(path[-1])
             if t[0] == '<' and t[1] == '/':
                 num = path.pop()
                 t2w[num]['end'] = ind
-        w2t.append(cnt + 1)
-        w2t.append(cnt + 2)
         tags.append('<no>')
         tags.append('<yes>')
         t2w.append({'start': len(tokens) - 2, 'end': len(tokens) - 2})
         t2w.append({'start': len(tokens) - 1, 'end': len(tokens) - 1})
-        assert len(w2t) == len(tokens)
         assert len(tags) == len(t2w), (len(tags), len(t2w))
         assert len(path) == 0, h
-        return w2t, t2w, tags
+        return t2w, tags
 
     def calculate_depth(html_code):
         def _calc_depth(tag, depth):
@@ -324,7 +312,7 @@ def read_squad_examples(input_file, is_training, tokenizer, simplify=False):
                         all_doc_tokens.append(sub_token)
 
                 # Generate extra information for features
-                tok_to_tags_index, tags_to_tok_index, orig_tags = word_to_tag_from_text(all_doc_tokens, bs(html_file))
+                tags_to_tok_index, orig_tags = word_to_tag_from_text(all_doc_tokens, bs(html_file))
                 # check_for_index(tags_to_tok_index, all_doc_tokens, bs(html_file))
 
                 # Process each qas, which is mainly calculate the answer position
@@ -377,11 +365,9 @@ def read_squad_examples(input_file, is_training, tokenizer, simplify=False):
                         answer_tid=answer_tid,
                         start_position=start_position,
                         end_position=end_position,
-                        is_impossible=False,
                         tok_to_orig_index=tok_to_orig_index,
                         orig_to_tok_index=orig_to_tok_index,
                         all_doc_tokens=all_doc_tokens,
-                        tok_to_tags_index=tok_to_tags_index,
                         tags_to_tok_index=tags_to_tok_index,
                         orig_tags=orig_tags,
                         tag_depth=tag_depth
@@ -456,25 +442,15 @@ def convert_examples_to_features(examples, tokenizer, loss_method, max_seq_lengt
         if len(query_tokens) > max_query_length:
             query_tokens = query_tokens[0:max_query_length]
 
-        tok_answer_tid = None
-        if is_training and example.is_impossible:
-            tok_answer_tid = -1
-        if is_training and not example.is_impossible:
-            tok_answer_tid = example.answer_tid
-        tok_start_position = None
-        tok_end_position = None
-        if is_training and example.is_impossible:
-            tok_start_position = -1
-            tok_end_position = -1
-        if is_training and not example.is_impossible:
-            tok_start_position = example.orig_to_tok_index[example.start_position]
-            if example.end_position < len(example.doc_tokens) - 1:
-                tok_end_position = example.orig_to_tok_index[example.end_position + 1] - 1
-            else:
-                tok_end_position = len(example.all_doc_tokens) - 1
-            (tok_start_position, tok_end_position) = _improve_answer_span(
-                example.all_doc_tokens, tok_start_position, tok_end_position, tokenizer,
-                example.orig_answer_text)
+        tok_answer_tid = example.answer_tid
+        tok_start_position = example.orig_to_tok_index[example.start_position]
+        if example.end_position < len(example.doc_tokens) - 1:
+            tok_end_position = example.orig_to_tok_index[example.end_position + 1] - 1
+        else:
+            tok_end_position = len(example.all_doc_tokens) - 1
+        (tok_start_position, tok_end_position) = _improve_answer_span(
+            example.all_doc_tokens, tok_start_position, tok_end_position, tokenizer,
+            example.orig_answer_text)
 
         # The -3 accounts for [CLS], [SEP] and [SEP]
         max_tokens_for_doc = max_seq_length - len(query_tokens) - 3
@@ -581,11 +557,11 @@ def convert_examples_to_features(examples, tokenizer, loss_method, max_seq_lengt
             assert len(segment_ids) == max_seq_length
             assert len(depth) == max_tag_length
 
-            span_is_impossible = example.is_impossible
+            span_is_impossible = False
             answer_tid = None
             start_position = None
             end_position = None
-            if is_training and not span_is_impossible:
+            if is_training:
                 # For training, if our document chunk does not contain an annotation
                 # we throw it out, since there is nothing to predict.
                 doc_start = doc_span.start

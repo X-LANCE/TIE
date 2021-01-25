@@ -554,7 +554,7 @@ def main():
                         help='the folder of the checkpoint is provided')
     parser.add_argument('--separate_read', action='store_true')
     parser.add_argument('--resave', action='store_true')
-    parser.add_argument('--evaluate_split', type=str, default='dev', choices=['dev', 'test'])
+    parser.add_argument('--evaluate_split', type=str, default='dev', choices=['dev', 'test', 'train'])
     parser.add_argument('--max_depth_embeddings', type=int, default=None,
                         help='Set to the max depth embedding for node if want to use the position embeddings')
     parser.add_argument('--loss_method', type=str, default='base', choices=['base', 'soft', 'hierarchy'])
