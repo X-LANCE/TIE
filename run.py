@@ -41,8 +41,7 @@ from transformers import (
 
 
 from model import GraphHtmlConfig, GraphHtmlBert, StrucDataset, SubDataset
-from utils import read_squad_examples, convert_examples_to_features, RawResult, write_predictions
-
+from utils import read_squad_examples, convert_examples_to_features, RawResult, write_predictions, write_tag_predictions
 
 # The following import is the official SQuAD evaluation script (2.0).
 # You can remove it from the dependencies if you are using this script outside of the library
@@ -175,7 +174,7 @@ def train(args, train_dataset, model, tokenizer):
                       'children'       : batch[-2],
                       'tag_to_tok'     : batch[-1]}
             outputs = model(**inputs)
-            loss = args.loss_gamma * outputs[0] + outputs[1]
+            loss = outputs[0] + args.loss_gamma * outputs[1]
 
             if args.n_gpu > 1:
                 loss = loss.mean()  # mean() to average on multi-gpu parallel (not distributed) training
@@ -299,10 +298,16 @@ def evaluate(args, model, tokenizer, prefix="", write_pred=True):
     output_result_file = os.path.join(args.output_dir, "qas_eval_results_{}.json".format(prefix))
     output_file = os.path.join(args.output_dir, "eval_matrix_results_{}".format(prefix))
 
-    returns = write_predictions(args.loss_method, examples, features, all_results, args.n_best_size, 1,
-                                args.max_answer_length, args.do_lower_case, output_prediction_file,
-                                output_tag_prediction_file, output_nbest_file, args.verbose_logging,
-                                write_pred=write_pred)  # TODO n best tag size greater than 1
+    if args.gamma == 0:
+        # TODO n best tag size greater than 1
+        returns = write_tag_predictions(args.loss_method, examples, features, all_results, 1,
+                                        output_tag_prediction_file, output_nbest_file, write_pred=write_pred)
+        output_prediction_file = None
+    else:
+        returns = write_predictions(args.loss_method, examples, features, all_results, args.n_best_size, 1,
+                                    args.max_answer_length, args.do_lower_case, output_prediction_file,
+                                    output_tag_prediction_file, output_nbest_file, args.verbose_logging,
+                                    write_pred=write_pred)  # TODO n best tag size greater than 1
     if not write_pred:
         output_prediction_file, output_tag_prediction_file = returns
 

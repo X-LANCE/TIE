@@ -684,6 +684,117 @@ RawResult = collections.namedtuple("RawResult",
                                    ["unique_id", "tag_logits", "start_logits", "end_logits"])
 
 
+def write_tag_predictions(loss_method, all_examples, all_features, all_results, n_best_tag_size,
+                          output_tag_prediction_file, output_nbest_file, write_pred):
+    logger.info("Writing tag predictions to: %s" % output_tag_prediction_file)
+
+    example_index_to_features = collections.defaultdict(list)
+    for feature in all_features:
+        example_index_to_features[feature.example_index].append(feature)
+
+    unique_id_to_result = {}
+    for result in all_results:
+        unique_id_to_result[result.unique_id] = result
+
+    _PrelimPrediction = collections.namedtuple(  # pylint: disable=invalid-name
+        "PrelimPrediction",
+        ["feature_index", "tag_index", "tag_logit", "tag_id"])
+
+    all_tag_predictions = collections.OrderedDict()
+    all_nbest_json = collections.OrderedDict()
+
+    for (example_index, example) in enumerate(all_examples):
+        features = example_index_to_features[example_index]
+
+        prelim_predictions = []
+        for (feature_index, feature) in enumerate(features):
+            result = unique_id_to_result[feature.unique_id]
+            possible_values = [0] + [ind for ind in range(feature.base_index,
+                                                          feature.base_index + len(feature.app_tags))]
+            if loss_method == 'hierarchy':
+                curr = feature.base_index
+                tag_indexes = [curr]
+                while result.tag_logits['index'][curr] in possible_values and curr != 0 \
+                        and len(tag_indexes) < len(feature.app_tags):
+                    curr = result.tag_logits['index'][curr]
+                    tag_indexes.append(curr)
+                tag_indexes = tag_indexes[-n_best_tag_size:]
+            else:
+                tag_indexes = _get_best_tags(result.tag_logits, n_best_tag_size, possible_values)
+            for tag_index in tag_indexes:
+                if tag_index == 0:
+                    continue
+                if loss_method == 'hierarchy':
+                    tag_logit = result.tag_logits['prob'][tag_index]  # TODO not reasonable yet
+                else:
+                    tag_logit = result.tag_logits[tag_index]
+                tag_id = feature.app_tags[tag_index - feature.base_index]
+                prelim_predictions.append(
+                    _PrelimPrediction(
+                        feature_index=feature_index,
+                        tag_index=tag_index,
+                        tag_logit=tag_logit,
+                        tag_id=tag_id))
+        prelim_predictions = sorted(
+            prelim_predictions,
+            key=lambda x: x.tag_logit,
+            reverse=True)
+
+        _NBestPrediction = collections.namedtuple(
+            "NBestPrediction", ["tag_logit", "tag_id"])
+
+        seen_predictions = {}
+        nbest = []
+        for pred in prelim_predictions:
+            if len(nbest) >= n_best_tag_size:
+                break
+            feature = features[pred.feature_index]
+            if pred.tag_index > 0:  # this is a non-null prediction
+                if pred.tag_id in seen_predictions:
+                    continue
+                seen_predictions[pred.tag_id] = True
+            else:
+                seen_predictions[-1] = True
+
+            nbest.append(_NBestPrediction(tag_logit=pred.tag_logit, tag_id=pred.tag_id))
+
+        # In very rare edge cases we could have no valid predictions. So we
+        # just create a nonce prediction in this case to avoid failure.
+        if not nbest:
+            nbest.append(_NBestPrediction(tag_logit=0.0, tag_id=-1))
+
+        assert len(nbest) >= 1
+
+        total_scores = []
+        for entry in nbest:
+            total_scores.append(entry.tag_logit)
+
+        probs = _compute_softmax(total_scores)
+
+        nbest_json = []
+        for (i, entry) in enumerate(nbest):
+            output = collections.OrderedDict()
+            output["probability"] = probs[i]
+            output["tag_logit"] = entry.tag_logit
+            output["tag_id"] = entry.tag_id
+            nbest_json.append(output)
+        assert len(nbest_json) >= 1
+
+        best_tag = nbest_json[0]["tag_id"]
+        all_tag_predictions[example.qas_id] = best_tag
+        all_nbest_json[example.qas_id] = nbest_json
+
+    if write_pred:
+
+        with open(output_nbest_file, "w") as writer:
+            writer.write(json.dumps(all_nbest_json, indent=4) + "\n")
+
+        with open(output_tag_prediction_file, 'w') as writer:
+            writer.write(json.dumps(all_tag_predictions, indent=4) + '\n')
+
+    return None, all_tag_predictions
+
+
 def write_predictions(loss_method, all_examples, all_features, all_results, n_best_size, n_best_tag_size,
                       max_answer_length, do_lower_case, output_prediction_file, output_tag_prediction_file,
                       output_nbest_file, verbose_logging, write_pred):
