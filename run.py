@@ -366,7 +366,8 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
         examples, _ = read_squad_examples(input_file=input_file,
                                           is_training=not evaluate,
                                           tokenizer=tokenizer,
-                                          simplify=False)
+                                          simplify=False,
+                                          sample_size=args.sample_size if args.enforce else None)
 
         features = convert_examples_to_features(examples=examples,
                                                 tokenizer=tokenizer,
@@ -377,8 +378,7 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
                                                 max_tag_length=args.max_tag_length,
                                                 soft_remain=args.soft_remain,
                                                 soft_decay=args.soft_decay,
-                                                is_training=not evaluate,
-                                                sample_size=args.sample_size)
+                                                is_training=not evaluate)
         if args.local_rank in [-1, 0] and not args.enforce:
             logger.info("Saving features into cached file %s", cached_features_file)
             torch.save(features, cached_features_file)

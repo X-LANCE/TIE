@@ -139,7 +139,7 @@ def html_escape(html):
     return html
 
 
-def read_squad_examples(input_file, is_training, tokenizer, simplify=False):
+def read_squad_examples(input_file, is_training, tokenizer, sample_size=None, simplify=False):
     """Read a SQuAD json file into a list of SquadExample."""
     with open(input_file, "r", encoding='utf-8') as reader:
         input_data = json.load(reader)["data"]
@@ -373,6 +373,12 @@ def read_squad_examples(input_file, is_training, tokenizer, simplify=False):
                         tag_depth=tag_depth
                     )
                     examples.append(example)
+
+    if sample_size is not None:
+        sampled_index = random.sample(range(0, len(examples)), sample_size)
+        sampled_index.sort()
+        examples = [examples[ind] for ind in sampled_index]
+
     return examples, all_tag_list
 
 
@@ -380,8 +386,7 @@ def convert_examples_to_features(examples, tokenizer, loss_method, max_seq_lengt
                                  doc_stride, max_query_length, is_training, soft_remain, soft_decay,
                                  cls_token='[CLS]', sep_token='[SEP]', pad_token=0,
                                  sequence_a_segment_id=0, sequence_b_segment_id=1,
-                                 cls_token_segment_id=0, pad_token_segment_id=0,
-                                 sample_size=None):
+                                 cls_token_segment_id=0, pad_token_segment_id=0):
     """Loads a data file into a list of `InputBatch`s."""
 
     def label_generating(html_tree, origin_answer_tid, app_tags, base):
@@ -424,33 +429,29 @@ def convert_examples_to_features(examples, tokenizer, loss_method, max_seq_lengt
     unique_id = 1000000000
     features = []
 
-    if sample_size is not None:
-        sampled_index = random.sample(range(0, len(examples)), sample_size)
-    else:
-        sampled_index = None
-
     for (example_index, example) in enumerate(tqdm(examples)):
 
         # if example_index % 100 == 0:
         #     logger.info('Converting %s/%s pos %s neg %s', example_index, len(examples), cnt_pos, cnt_neg)
 
-        if sample_size is not None:
-            if example_index not in sampled_index:
-                continue
-
         query_tokens = tokenizer.tokenize(example.question_text)
         if len(query_tokens) > max_query_length:
             query_tokens = query_tokens[0:max_query_length]
 
-        tok_answer_tid = example.answer_tid
-        tok_start_position = example.orig_to_tok_index[example.start_position]
-        if example.end_position < len(example.doc_tokens) - 1:
-            tok_end_position = example.orig_to_tok_index[example.end_position + 1] - 1
-        else:
-            tok_end_position = len(example.all_doc_tokens) - 1
-        (tok_start_position, tok_end_position) = _improve_answer_span(
-            example.all_doc_tokens, tok_start_position, tok_end_position, tokenizer,
-            example.orig_answer_text)
+        tok_answer_tid = None
+        tok_start_position = None
+        tok_end_position = None
+        if is_training:
+            tok_answer_tid = example.answer_tid
+        if is_training:
+            tok_start_position = example.orig_to_tok_index[example.start_position]
+            if example.end_position < len(example.doc_tokens) - 1:
+                tok_end_position = example.orig_to_tok_index[example.end_position + 1] - 1
+            else:
+                tok_end_position = len(example.all_doc_tokens) - 1
+            (tok_start_position, tok_end_position) = _improve_answer_span(
+                example.all_doc_tokens, tok_start_position, tok_end_position, tokenizer,
+                example.orig_answer_text)
 
         # The -3 accounts for [CLS], [SEP] and [SEP]
         max_tokens_for_doc = max_seq_length - len(query_tokens) - 3
