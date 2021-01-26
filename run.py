@@ -298,7 +298,7 @@ def evaluate(args, model, tokenizer, prefix="", write_pred=True):
     output_result_file = os.path.join(args.output_dir, "qas_eval_results_{}.json".format(prefix))
     output_file = os.path.join(args.output_dir, "eval_matrix_results_{}".format(prefix))
 
-    if args.gamma == 0:
+    if args.loss_gamma == 0:
         # TODO n best tag size greater than 1
         returns = write_tag_predictions(args.loss_method, examples, features, all_results, 1,
                                         output_tag_prediction_file, output_nbest_file, write_pred=write_pred)

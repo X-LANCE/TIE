@@ -150,7 +150,7 @@ def compute_coin(f, t_gold, addition, t_pred, output_exact=False):
             p_gold.add(e['tid'])
         p_pred, e_pred = set(), h.find(tid=t_pred)
         if e_pred is None:
-            return 0
+            return (0, 0.) if output_exact else 0.
         else:
             p_pred.add(e_pred['tid'])
             if e_pred.name != 'html':
@@ -176,7 +176,7 @@ def get_raw_scores(dataset, preds, tag_preds, data_dir):
                     qid = qa['id']
                     gold_tag_answers = [a['element_id'] for a in qa['answers']]
                     additional_tag_information = [a['answer_start'] for a in qa['answers']]
-                    if qid not in preds:
+                    if qid not in tag_preds:
                         print('Missing prediction for %s' % qid)
                         continue
                     t_pred = tag_preds[qid]
