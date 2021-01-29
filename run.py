@@ -41,7 +41,8 @@ from transformers import (
 
 
 from model import GraphHtmlConfig, GraphHtmlBert, StrucDataset, SubDataset
-from utils import read_squad_examples, convert_examples_to_features, RawResult, write_predictions, write_tag_predictions
+from utils import read_squad_examples, convert_examples_to_features, RawResult, write_predictions, \
+    write_tag_predictions, write_predictions_provided_tag
 
 # The following import is the official SQuAD evaluation script (2.0).
 # You can remove it from the dependencies if you are using this script outside of the library
@@ -170,6 +171,7 @@ def train(args, train_dataset, model, tokenizer):
                       'start_positions': batch[4],
                       'end_positions'  : batch[5],
                       'tag_depth'      : batch[6],
+                      'base_ind'       : batch[-4],
                       'gat_mask'       : batch[-3],
                       'children'       : batch[-2],
                       'tag_to_tok'     : batch[-1]}
@@ -262,20 +264,31 @@ def evaluate(args, model, tokenizer, prefix="", write_pred=True):
         model.eval()
         batch = tuple(t.to(args.device) for t in batch)
         with torch.no_grad():
-            inputs = {'input_ids'      : batch[0],
-                      'attention_mask' : batch[1],
-                      'token_type_ids' : batch[2],
-                      'tag_depth'      : batch[4],
-                      'gat_mask'       : batch[-3],
-                      'children'       : batch[-2],
-                      'tag_to_tok'     : batch[-1]}
+            if args.resume_from_PLM is not None:
+                inputs = {'input_ids': batch[0],
+                          'attention_mask': batch[1],
+                          'token_type_ids': batch[2]}
+            else:
+                inputs = {'input_ids'      : batch[0],
+                          'attention_mask' : batch[1],
+                          'token_type_ids' : batch[2],
+                          'tag_depth'      : batch[4],
+                          'base_ind'       : batch[-4],
+                          'gat_mask'       : batch[-3],
+                          'children'       : batch[-2],
+                          'tag_to_tok'     : batch[-1]}
             feature_indices = batch[3]
             outputs = model(**inputs)
 
         for i, feature_index in enumerate(feature_indices):
             eval_feature = features[feature_index.item()]
             unique_id = int(eval_feature.unique_id)
-            if args.loss_method == 'hierarchy':
+            if args.resume_from_PLM is not None:
+                result = RawResult(unique_id=unique_id,
+                                   tag_logits=None,
+                                   start_logits=to_list(outputs[0][i]),
+                                   end_logits=to_list(outputs[1][i]))
+            elif args.loss_method == 'hierarchy':
                 result = RawResult(unique_id=unique_id,
                                    tag_logits={'prob': to_list(outputs[1][i]),
                                                'index': to_list(outputs[2][i])},
@@ -298,7 +311,12 @@ def evaluate(args, model, tokenizer, prefix="", write_pred=True):
     output_result_file = os.path.join(args.output_dir, "qas_eval_results_{}.json".format(prefix))
     output_file = os.path.join(args.output_dir, "eval_matrix_results_{}".format(prefix))
 
-    if args.loss_gamma == 0:
+    if args.provided_tag_pred is not None:
+        returns = write_predictions_provided_tag(examples, features, all_results, args.n_best_size,
+                                                 args.max_answer_length, args.do_lower_case, output_prediction_file,
+                                                 args.provided_tag_pred, output_tag_prediction_file, output_nbest_file,
+                                                 args.verbose_logging, write_pred=write_pred)
+    elif args.loss_gamma == 0:
         # TODO n best tag size greater than 1
         returns = write_tag_predictions(args.loss_method, examples, features, all_results, 1,
                                         output_tag_prediction_file, output_nbest_file, write_pred=write_pred)
@@ -569,6 +587,7 @@ def main():
     parser.add_argument('--separate_mask', action='store_true')
     parser.add_argument('--resume_from_PLM', type=str, default=None,
                         help='the path of the folder contains the state dict file and the tokenizer')
+    parser.add_argument('--provided_tag_pred', type=str, default=None)
     args = parser.parse_args()
 
     if os.path.exists(args.output_dir) and os.listdir(
@@ -679,49 +698,73 @@ def main():
     # Evaluation - we can ask to evaluate all the checkpoints (sub-directories) in a directory
     results = {}
     if args.do_eval and args.local_rank in [-1, 0]:
-        checkpoints = [args.output_dir]
-        if args.eval_all_checkpoints:
-            checkpoints = list(
-                os.path.dirname(c) for c in sorted(glob.glob(args.output_dir + '/**/' + WEIGHTS_NAME, recursive=True)))
-            logging.getLogger("transformers.modeling_utils").setLevel(logging.WARN)  # Reduce model loading logs
-
-        logger.info("Evaluate the following checkpoints: %s", checkpoints)
-
-        if args.model_type == 'bert':
-            tokenizer = BertTokenizer.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case)
-        elif args.model_type == 'electra':
-            tokenizer = ElectraTokenizer.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case)
-        else:
-            raise NotImplementedError()
-
-        bert_config = AutoConfig.from_pretrained(args.config_name if args.config_name else args.model_name_or_path,
-                                                 cache_dir=args.cache_dir)
-        bert_model = AutoModelForQuestionAnswering.from_pretrained(args.model_name_or_path,
-                                                                   from_tf=bool('.ckpt' in args.model_name_or_path),
-                                                                   config=bert_config, cache_dir=args.cache_dir)
-        bert_model.resize_token_embeddings(len(tokenizer))
-
-        for checkpoint in checkpoints:
-            # Reload the model
-            global_step = checkpoint.split('-')[-1] if len(checkpoints) > 1 else ""
-            try:
-                int(global_step)
-            except ValueError:
-                global_step = ""
-            if global_step and int(global_step) < args.eval_from_checkpoint:
-                continue
-            if global_step and args.eval_to_checkpoint and int(global_step) >= args.eval_to_checkpoint:
-                continue
-            html_config = GraphHtmlConfig(args, **config.__dict__)
-            model = GraphHtmlBert(bert_model, html_config)
-            model.load_state_dict(torch.load(os.path.join(checkpoint, 'pytorch_model.bin')))  # confirmed correct
+        if args.provided_tag_pred is not None:
+            assert args.resume_from_PLM is not None
+            logger.info("Evaluate the PLM provided with tags: %s", args.resume_from_PLM)
+            if args.model_type == 'bert':
+                tokenizer = BertTokenizer.from_pretrained(args.resume_from_PLM, do_lower_case=args.do_lower_case)
+            elif args.model_type == 'electra':
+                tokenizer = ElectraTokenizer.from_pretrained(args.resume_from_PLM, do_lower_case=args.do_lower_case)
+            else:
+                raise NotImplementedError()
+            bert_config = AutoConfig.from_pretrained(args.config_name if args.config_name else args.model_name_or_path,
+                                                     cache_dir=args.cache_dir)
+            bert_model = AutoModelForQuestionAnswering.from_pretrained(args.model_name_or_path,
+                                                                       from_tf=bool('.ckpt' in args.model_name_or_path),
+                                                                       config=bert_config, cache_dir=args.cache_dir)
+            bert_model.resize_token_embeddings(len(tokenizer))
+            if 'HPLM' in args.resume_from_PLM:
+                model = bert_model
+            else:
+                raise NotImplementedError()
+            model.load_state_dict(torch.load(os.path.join(args.resume_from_PLM, 'pytorch_model.bin')))
             model.to(args.device)
-
-            # Evaluate
-            result = evaluate(args, model, tokenizer, prefix=global_step)
-
-            result = dict((k + ('_{}'.format(global_step) if global_step else ''), v) for k, v in result.items())
+            result = evaluate(args, model, tokenizer)
             results.update(result)
+        else:
+            checkpoints = [args.output_dir]
+            if args.eval_all_checkpoints:
+                checkpoints = list(
+                    os.path.dirname(c) for c in sorted(glob.glob(args.output_dir + '/**/' + WEIGHTS_NAME, recursive=True)))
+                logging.getLogger("transformers.modeling_utils").setLevel(logging.WARN)  # Reduce model loading logs
+    
+            logger.info("Evaluate the following checkpoints: %s", checkpoints)
+    
+            if args.model_type == 'bert':
+                tokenizer = BertTokenizer.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case)
+            elif args.model_type == 'electra':
+                tokenizer = ElectraTokenizer.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case)
+            else:
+                raise NotImplementedError()
+
+            bert_config = AutoConfig.from_pretrained(args.config_name if args.config_name else args.model_name_or_path,
+                                                     cache_dir=args.cache_dir)
+            bert_model = AutoModelForQuestionAnswering.from_pretrained(args.model_name_or_path,
+                                                                       from_tf=bool('.ckpt' in args.model_name_or_path),
+                                                                       config=bert_config, cache_dir=args.cache_dir)
+            bert_model.resize_token_embeddings(len(tokenizer))
+
+            for checkpoint in checkpoints:
+                # Reload the model
+                global_step = checkpoint.split('-')[-1] if len(checkpoints) > 1 else ""
+                try:
+                    int(global_step)
+                except ValueError:
+                    global_step = ""
+                if global_step and int(global_step) < args.eval_from_checkpoint:
+                    continue
+                if global_step and args.eval_to_checkpoint and int(global_step) >= args.eval_to_checkpoint:
+                    continue
+                html_config = GraphHtmlConfig(args, **config.__dict__)
+                model = GraphHtmlBert(bert_model, html_config)
+                model.load_state_dict(torch.load(os.path.join(checkpoint, 'pytorch_model.bin')))  # confirmed correct
+                model.to(args.device)
+
+                # Evaluate
+                result = evaluate(args, model, tokenizer, prefix=global_step)
+
+                result = dict((k + ('_{}'.format(global_step) if global_step else ''), v) for k, v in result.items())
+                results.update(result)
 
     logger.info("Results: {}".format(results))
 

@@ -103,6 +103,8 @@ class StrucDataset(Dataset):
         example_index = self.gat_mask[1][index]
         html_tree = self.gat_mask[2][example_index]
         base = self.base_index[index]
+        output.append(base)
+
         gat_mask = torch.zeros((self.shape[0], self.shape[0]), dtype=torch.long)
         gat_mask[:, :len(tag_to_token_index)] = 1
         temp = torch.tensor(form_tree_mask(app_tags, html_tree, separate=self.separate))
@@ -252,6 +254,7 @@ class GraphHtmlBert(BertPreTrainedModel):
             answer_tid=None,
             tag_to_tok=None,
             tag_depth=None,
+            base_ind=None,
     ):
 
         outputs = self.ptm(
@@ -283,6 +286,9 @@ class GraphHtmlBert(BertPreTrainedModel):
         extended_gat_mask = convert_mask_to_reality(extended_gat_mask)
         gat_outputs = self.gat(gat_inputs, attention_mask=extended_gat_mask, head_mask=head_mask)
         final_outputs = gat_outputs[0]
+        if self.loss_method == 'hierarchy':
+            question_emb = final_outputs[:, 1:base_ind - 1, :].mean(dim=1, keepdim=True)
+            final_outputs = final_outputs + question_emb
         tag_logits = self.gat_outputs(final_outputs)
         tag_logits = tag_logits.squeeze(-1)
         if self.loss_method == 'hierarchy':
@@ -339,4 +345,5 @@ class GraphHtmlBert(BertPreTrainedModel):
 
         return outputs
         # (loss), (total_loss), tag_logits, (prob, index), start_logits, end_logits, (hidden_states), (attentions)
+
 

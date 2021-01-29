@@ -32,7 +32,6 @@ import bs4
 from bs4 import BeautifulSoup as bs
 from transformers.tokenization_bert import BasicTokenizer, whitespace_tokenize
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -54,6 +53,7 @@ class SquadExample(object):
                  tok_to_orig_index=None,
                  orig_to_tok_index=None,
                  all_doc_tokens=None,
+                 tok_to_tags_index=None,
                  tags_to_tok_index=None,
                  orig_tags=None,
                  tag_depth=None):
@@ -68,6 +68,7 @@ class SquadExample(object):
         self.tok_to_orig_index = tok_to_orig_index
         self.orig_to_tok_index = orig_to_tok_index
         self.all_doc_tokens = all_doc_tokens
+        self.tok_to_tags_index = tok_to_tags_index
         self.tags_to_tok_index = tags_to_tok_index
         self.orig_tags = orig_tags
         self.tag_depth = tag_depth
@@ -104,6 +105,7 @@ class InputFeatures(object):
                  answer_tid=None,
                  start_position=None,
                  end_position=None,
+                 token_to_tag_index=None,
                  tag_to_token_index=None,
                  app_tags=None,
                  depth=None,
@@ -123,6 +125,7 @@ class InputFeatures(object):
         self.answer_tid = answer_tid
         self.start_position = start_position
         self.end_position = end_position
+        self.token_to_tag_index = token_to_tag_index
         self.tag_to_token_index = tag_to_token_index
         self.app_tags = app_tags
         self.depth = depth
@@ -202,13 +205,15 @@ def read_squad_examples(input_file, is_training, tokenizer, sample_size=None, si
 
     def word_to_tag_from_text(tokens, h):
         cnt, path = -1, []
-        t2w, tags = [], []
+        w2t, t2w, tags = [], [], []
         for ind in range(len(tokens) - 2):
             t = tokens[ind]
             if len(t) < 2:
+                w2t.append(path[-1])
                 continue
             if t[0] == '<' and t[-2] == '/':
                 cnt += 1
+                w2t.append(cnt)
                 tags.append(t)
                 t2w.append({'start': ind, 'end': ind})
                 continue
@@ -217,16 +222,20 @@ def read_squad_examples(input_file, is_training, tokenizer, sample_size=None, si
                 path.append(cnt)
                 tags.append(t)
                 t2w.append({'start': ind})
+            w2t.append(path[-1])
             if t[0] == '<' and t[1] == '/':
                 num = path.pop()
                 t2w[num]['end'] = ind
+        w2t.append(cnt + 1)
+        w2t.append(cnt + 2)
         tags.append('<no>')
         tags.append('<yes>')
         t2w.append({'start': len(tokens) - 2, 'end': len(tokens) - 2})
         t2w.append({'start': len(tokens) - 1, 'end': len(tokens) - 1})
+        assert len(w2t) == len(tokens)
         assert len(tags) == len(t2w), (len(tags), len(t2w))
         assert len(path) == 0, h
-        return t2w, tags
+        return w2t, t2w, tags
 
     def calculate_depth(html_code):
         def _calc_depth(tag, depth):
@@ -235,6 +244,7 @@ def read_squad_examples(input_file, is_training, tokenizer, sample_size=None, si
                     continue
                 tag_depth.append(depth)
                 _calc_depth(t, depth + 1)
+
         tag_depth = []
         _calc_depth(html_code, 1)
         tag_depth += [2, 2]
@@ -312,7 +322,7 @@ def read_squad_examples(input_file, is_training, tokenizer, sample_size=None, si
                         all_doc_tokens.append(sub_token)
 
                 # Generate extra information for features
-                tags_to_tok_index, orig_tags = word_to_tag_from_text(all_doc_tokens, bs(html_file))
+                tok_to_tags_index, tags_to_tok_index, orig_tags = word_to_tag_from_text(all_doc_tokens, bs(html_file))
                 # check_for_index(tags_to_tok_index, all_doc_tokens, bs(html_file))
 
                 # Process each qas, which is mainly calculate the answer position
@@ -368,6 +378,7 @@ def read_squad_examples(input_file, is_training, tokenizer, sample_size=None, si
                         tok_to_orig_index=tok_to_orig_index,
                         orig_to_tok_index=orig_to_tok_index,
                         all_doc_tokens=all_doc_tokens,
+                        tok_to_tags_index=tok_to_tags_index,
                         tags_to_tok_index=tags_to_tok_index,
                         orig_tags=orig_tags,
                         tag_depth=tag_depth
@@ -478,17 +489,20 @@ def convert_examples_to_features(examples, tokenizer, loss_method, max_seq_lengt
             token_is_max_context = {}
             segment_ids = []
             tag_to_token_index = []
+            token_to_tag_index = []
             depth = []
 
             # CLS
             tokens.append(cls_token)
             segment_ids.append(cls_token_segment_id)
             tag_to_token_index.append([0, 0])
+            token_to_tag_index.append(-1)
             depth.append(0)
 
             # Query
             for i in range(len(query_tokens)):
                 tag_to_token_index.append([len(tokens) + i, len(tokens) + i])
+                token_to_tag_index.append(-1)
             tokens += query_tokens
             segment_ids += [sequence_a_segment_id] * len(query_tokens)
             depth += [0] * len(query_tokens)
@@ -497,6 +511,7 @@ def convert_examples_to_features(examples, tokenizer, loss_method, max_seq_lengt
             tokens.append(sep_token)
             segment_ids.append(sequence_a_segment_id)
             tag_to_token_index.append([len(tokens) - 1, len(tokens) - 1])
+            token_to_tag_index.append(-1)
             depth.append(0)
 
             # Paragraph
@@ -526,6 +541,7 @@ def convert_examples_to_features(examples, tokenizer, loss_method, max_seq_lengt
             for i in range(doc_span.length):
                 split_token_index = doc_span.start + i
                 token_to_orig_map[len(tokens)] = example.tok_to_orig_index[split_token_index]
+                token_to_tag_index.append(example.tok_to_tags_index[split_token_index])
                 is_max_context = _check_is_max_context(doc_spans, doc_span_index,
                                                        split_token_index)
                 token_is_max_context[len(tokens)] = is_max_context
@@ -537,6 +553,7 @@ def convert_examples_to_features(examples, tokenizer, loss_method, max_seq_lengt
             tokens.append(sep_token)
             segment_ids.append(sequence_b_segment_id)
             tag_to_token_index.append([len(tokens) - 1, len(tokens) - 1])
+            token_to_tag_index.append(-1)
             depth.append(0)
 
             input_ids = tokenizer.convert_tokens_to_ids(tokens)
@@ -550,12 +567,14 @@ def convert_examples_to_features(examples, tokenizer, loss_method, max_seq_lengt
                 input_ids.append(pad_token)
                 input_mask.append(0)
                 segment_ids.append(pad_token_segment_id)
+                token_to_tag_index.append(-1)
             while len(depth) < max_tag_length:
                 depth.append(0)
 
             assert len(input_ids) == max_seq_length
             assert len(input_mask) == max_seq_length
             assert len(segment_ids) == max_seq_length
+            assert len(token_to_tag_index) == max_seq_length
             assert len(depth) == max_tag_length
 
             span_is_impossible = False
@@ -596,6 +615,7 @@ def convert_examples_to_features(examples, tokenizer, loss_method, max_seq_lengt
                     answer_tid=answer_tid,
                     start_position=start_position,
                     end_position=end_position,
+                    token_to_tag_index=token_to_tag_index,
                     tag_to_token_index=tag_to_token_index,
                     app_tags=app_tags,
                     depth=depth,
@@ -749,7 +769,6 @@ def write_tag_predictions(loss_method, all_examples, all_features, all_results, 
         for pred in prelim_predictions:
             if len(nbest) >= n_best_tag_size:
                 break
-            feature = features[pred.feature_index]
             if pred.tag_index > 0:  # this is a non-null prediction
                 if pred.tag_id in seen_predictions:
                     continue
@@ -786,7 +805,6 @@ def write_tag_predictions(loss_method, all_examples, all_features, all_results, 
         all_nbest_json[example.qas_id] = nbest_json
 
     if write_pred:
-
         with open(output_nbest_file, "w") as writer:
             writer.write(json.dumps(all_nbest_json, indent=4) + "\n")
 
@@ -833,7 +851,7 @@ def write_predictions(loss_method, all_examples, all_features, all_results, n_be
             if loss_method == 'hierarchy':
                 curr = feature.base_index
                 tag_indexes = [curr]
-                while result.tag_logits['index'][curr] in possible_values and curr != 0\
+                while result.tag_logits['index'][curr] in possible_values and curr != 0 \
                         and len(tag_indexes) < len(feature.app_tags):
                     curr = result.tag_logits['index'][curr]
                     tag_indexes.append(curr)
@@ -977,6 +995,176 @@ def write_predictions(loss_method, all_examples, all_features, all_results, n_be
             writer.write(json.dumps(all_tag_predictions, indent=4) + '\n')
 
     return all_predictions, all_tag_predictions
+
+
+def write_predictions_provided_tag(all_examples, all_features, all_results, n_best_size, max_answer_length,
+                                   do_lower_case, output_prediction_file, output_tag_prediction_file,
+                                   output_refined_tag_prediction_file, output_nbest_file, verbose_logging, write_pred):
+    logger.info("Writing predictions to: %s" % output_prediction_file)
+    logger.info("Writing nbest to: %s" % output_nbest_file)
+
+    def _get_tag_id(ind2tok, start_ind, end_ind, base, ind2tag):
+        tag_ind = -1
+        for ind in range(base, len(ind2tok)):
+            if (start_ind >= ind2tok[ind][0]) and (end_ind <= ind2tok[ind][1]):
+                tag_ind = ind
+        tag_ind -= base
+        assert tag_ind >= 0
+        return ind2tag[tag_ind]
+
+    example_index_to_features = collections.defaultdict(list)
+    for feature in all_features:
+        example_index_to_features[feature.example_index].append(feature)
+
+    unique_id_to_result = {}
+    for result in all_results:
+        unique_id_to_result[result.unique_id] = result
+
+    _PrelimPrediction = collections.namedtuple(  # pylint: disable=invalid-name
+        "PrelimPrediction",
+        ["feature_index",
+         "tag_index", "start_index", "end_index",
+         "tag_logit", "start_logit", "end_logit",
+         "tag_id"])
+
+    all_predictions = collections.OrderedDict()
+    all_nbest_json = collections.OrderedDict()
+    all_refined_tag_predictions = collections.OrderedDict()
+    all_tag_predictions = json.load(open(output_tag_prediction_file))
+
+    for (example_index, example) in enumerate(all_examples):
+        features = example_index_to_features[example_index]
+        tag_pred = all_tag_predictions[example.qas_id][0]['tag_id']
+
+        prelim_predictions = []
+        for (feature_index, feature) in enumerate(features):
+            result = unique_id_to_result[feature.unique_id]
+            if tag_pred not in feature.app_tags:
+                continue
+            tag_index = feature.app_tags.index(tag_pred) + feature.base_index
+            left_bound, right_bound = feature.tag_to_token_index[tag_index]
+            start_indexes = _get_best_indexes(result.start_logits[left_bound:right_bound + 1], n_best_size)
+            end_indexes = _get_best_indexes(result.end_logits[left_bound:right_bound + 1], n_best_size)
+            start_indexes = [ind + left_bound for ind in start_indexes]
+            end_indexes = [ind + left_bound for ind in end_indexes]
+            tag_logit = all_tag_predictions[example.qas_id][0]['tag_logit']
+            for start_index in start_indexes:
+                for end_index in end_indexes:
+                    # We could hypothetically create invalid predictions, e.g., predict
+                    # that the start of the span is in the question. We throw out all
+                    # invalid predictions.
+                    if not feature.token_is_max_context.get(start_index, False):
+                        continue
+                    if end_index < start_index:
+                        continue
+                    length = end_index - start_index + 1
+                    if length > max_answer_length:
+                        continue
+                    tag_ids = _get_tag_id(feature.tag_to_token_index,
+                                          start_index, end_index,
+                                          feature.base_index, feature.app_tags)
+                    prelim_predictions.append(
+                        _PrelimPrediction(
+                            feature_index=feature_index,
+                            tag_index=tag_index,
+                            start_index=start_index,
+                            end_index=end_index,
+                            tag_logit=tag_logit,
+                            start_logit=result.start_logits[start_index],
+                            end_logit=result.end_logits[end_index],
+                            tag_id=tag_ids))
+        prelim_predictions = sorted(
+            prelim_predictions,
+            key=lambda x: (x.start_logit + x.end_logit),
+            reverse=True)
+
+        _NBestPrediction = collections.namedtuple(
+            "NBestPrediction", ["text", "tag_logit", "start_logit", "end_logit", "tag_id"])
+
+        seen_predictions = {}
+        nbest = []
+        for pred in prelim_predictions:
+            if len(nbest) >= n_best_size:
+                break
+            feature = features[pred.feature_index]
+            tok_tokens = feature.tokens[pred.start_index:(pred.end_index + 1)]
+            orig_doc_start = feature.token_to_orig_map[pred.start_index]
+            orig_doc_end = feature.token_to_orig_map[pred.end_index]
+            orig_tokens = example.doc_tokens[orig_doc_start:(orig_doc_end + 1)]
+            tok_text = " ".join(tok_tokens)
+
+            # De-tokenize WordPieces that have been split off.
+            tok_text = tok_text.replace(" ##", "")
+            tok_text = tok_text.replace("##", "")
+
+            # Clean whitespace
+            tok_text = tok_text.strip()
+            tok_text = " ".join(tok_text.split())
+            orig_text = " ".join(orig_tokens)
+
+            final_text = get_final_text(tok_text, orig_text, do_lower_case, verbose_logging)
+            if final_text in seen_predictions:
+                continue
+
+            seen_predictions[final_text] = True
+
+            nbest.append(
+                _NBestPrediction(
+                    text=final_text,
+                    tag_logit=pred.tag_logit,
+                    start_logit=pred.start_logit,
+                    end_logit=pred.end_logit,
+                    tag_id=pred.tag_id))
+
+        # In very rare edge cases we could have no valid predictions. So we
+        # just create a nonce prediction in this case to avoid failure.
+        if not nbest:
+            nbest.append(
+                _NBestPrediction(
+                    text='empty',
+                    start_logit=0.0,
+                    end_logit=0.0,
+                    tag_logit=0.0,
+                    tag_id=-1))
+
+        assert len(nbest) >= 1
+
+        total_scores = []
+        for entry in nbest:
+            total_scores.append(entry.start_logit + entry.end_logit)
+
+        probs = _compute_softmax(total_scores)
+
+        nbest_json = []
+        for (i, entry) in enumerate(nbest):
+            output = collections.OrderedDict()
+            output["text"] = entry.text
+            output["probability"] = probs[i]
+            output["tag_logit"] = entry.tag_logit
+            output["start_logit"] = entry.start_logit
+            output["end_logit"] = entry.end_logit
+            output["tag_id"] = entry.tag_id
+            nbest_json.append(output)
+        assert len(nbest_json) >= 1
+
+        best_text = nbest_json[0]["text"].split()
+        best_text = ' '.join([w for w in best_text if w[0] != '<' or w[-1] != '>'])
+        all_predictions[example.qas_id] = best_text
+        best_tag = nbest_json[0]["tag_id"]
+        all_refined_tag_predictions[example.qas_id] = best_tag
+        all_nbest_json[example.qas_id] = nbest_json
+
+    if write_pred:
+        with open(output_prediction_file, "w") as writer:
+            writer.write(json.dumps(all_predictions, indent=4) + "\n")
+
+        with open(output_nbest_file, "w") as writer:
+            writer.write(json.dumps(all_nbest_json, indent=4) + "\n")
+
+        with open(output_refined_tag_prediction_file, 'w') as writer:
+            writer.write(json.dumps(all_refined_tag_predictions, indent=4) + '\n')
+
+    return all_predictions, all_refined_tag_predictions
 
 
 def get_final_text(pred_text, orig_text, do_lower_case, verbose_logging=False):
