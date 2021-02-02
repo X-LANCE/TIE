@@ -301,9 +301,11 @@ class GraphHtmlBert(BertPreTrainedModel):
             b, t, _ = tag_logits.size()
             tag_logits = torch.cat([tag_logits,
                                     self.stop_margin.unsqueeze(0).unsqueeze(0).repeat((b, t, 1))], dim=2)
-            prob, index = tag_logits.max(dim=2)
-            outputs = (prob, index,) + outputs
-        outputs = (tag_logits,) + outputs
+            tag_probs = torch.softmax(tag_logits, dim=2)
+            prob, index = tag_probs.max(dim=2)
+            outputs = (tag_probs, prob, index,) + outputs
+        else:
+            outputs = (tag_logits,) + outputs
 
         if start_positions is not None and end_positions is not None:
             # If we are on multi-GPU, split add a dimension

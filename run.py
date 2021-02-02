@@ -42,7 +42,7 @@ from transformers import (
 
 from model import GraphHtmlConfig, GraphHtmlBert, StrucDataset, SubDataset
 from utils import read_squad_examples, convert_examples_to_features, RawResult, write_predictions, \
-    write_tag_predictions, write_predictions_provided_tag
+    write_tag_predictions, write_predictions_provided_tag, get_nbest_tags
 
 # The following import is the official SQuAD evaluation script (2.0).
 # You can remove it from the dependencies if you are using this script outside of the library
@@ -289,11 +289,19 @@ def evaluate(args, model, tokenizer, prefix="", write_pred=True):
                                    start_logits=to_list(outputs[0][i]),
                                    end_logits=to_list(outputs[1][i]))
             elif args.loss_method == 'hierarchy':
-                result = RawResult(unique_id=unique_id,
-                                   tag_logits={'prob': to_list(outputs[1][i]),
-                                               'index': to_list(outputs[2][i])},
-                                   start_logits=to_list(outputs[3][i]),
-                                   end_logits=to_list(outputs[4][i]))
+                if args.n_best_tag_size > 1:
+                    tag_logits = get_nbest_tags(eval_feature.base_index, eval_feature.app_tags,
+                                                args.n_best_tag_size, outputs[0][i])
+                    result = RawResult(unique_id=unique_id,
+                                       tag_logits=tag_logits,
+                                       start_logits=to_list(outputs[3][i]),
+                                       end_logits=to_list(outputs[4][i]))
+                else:
+                    result = RawResult(unique_id=unique_id,
+                                       tag_logits={'prob': to_list(outputs[1][i]),
+                                                   'index': to_list(outputs[2][i])},
+                                       start_logits=to_list(outputs[3][i]),
+                                       end_logits=to_list(outputs[4][i]))
             else:
                 result = RawResult(unique_id=unique_id,
                                    tag_logits=to_list(outputs[0][i]),
@@ -318,14 +326,14 @@ def evaluate(args, model, tokenizer, prefix="", write_pred=True):
                                                  args.verbose_logging, write_pred=write_pred)
     elif args.loss_gamma == 0:
         # TODO n best tag size greater than 1
-        returns = write_tag_predictions(args.loss_method, examples, features, all_results, 1,
+        returns = write_tag_predictions(args.loss_method, examples, features, all_results, 1, args.stop_margin,
                                         output_tag_prediction_file, output_nbest_file, write_pred=write_pred)
         output_prediction_file = None
     else:
         returns = write_predictions(args.loss_method, examples, features, all_results, args.n_best_size, 1,
-                                    args.max_answer_length, args.do_lower_case, output_prediction_file,
-                                    output_tag_prediction_file, output_nbest_file, args.verbose_logging,
-                                    write_pred=write_pred)  # TODO n best tag size greater than 1
+                                    args.stop_margin, args.max_answer_length, args.do_lower_case,
+                                    output_prediction_file, output_tag_prediction_file, output_nbest_file,
+                                    args.verbose_logging, write_pred=write_pred)  # TODO n best tag size greater than 1
     if not write_pred:
         output_prediction_file, output_tag_prediction_file = returns
 
@@ -588,6 +596,8 @@ def main():
     parser.add_argument('--resume_from_PLM', type=str, default=None,
                         help='the path of the folder contains the state dict file and the tokenizer')
     parser.add_argument('--provided_tag_pred', type=str, default=None)
+    parser.add_argument('--stop_margin', type=float, default=0.5)
+    parser.add_argument('--n_best_tag_size', type=int, default=1)
     args = parser.parse_args()
 
     if os.path.exists(args.output_dir) and os.listdir(

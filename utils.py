@@ -705,7 +705,7 @@ RawResult = collections.namedtuple("RawResult",
                                    ["unique_id", "tag_logits", "start_logits", "end_logits"])
 
 
-def write_tag_predictions(loss_method, all_examples, all_features, all_results, n_best_tag_size,
+def write_tag_predictions(loss_method, all_examples, all_features, all_results, n_best_tag_size, stop_margin,
                           output_tag_prediction_file, output_nbest_file, write_pred):
     logger.info("Writing tag predictions to: %s" % output_tag_prediction_file)
 
@@ -732,21 +732,29 @@ def write_tag_predictions(loss_method, all_examples, all_features, all_results, 
             result = unique_id_to_result[feature.unique_id]
             possible_values = [0] + [ind for ind in range(feature.base_index,
                                                           feature.base_index + len(feature.app_tags))]
-            if loss_method == 'hierarchy':
+            if loss_method == 'hierarchy' and n_best_tag_size == 1:
                 curr = feature.base_index
                 tag_indexes = [curr]
                 while result.tag_logits['index'][curr] in possible_values and curr != 0 \
-                        and len(tag_indexes) < len(feature.app_tags):
+                        and len(tag_indexes) < len(feature.app_tags) \
+                        and result.tag_logits['prob'][curr] >= stop_margin:
                     curr = result.tag_logits['index'][curr]
                     tag_indexes.append(curr)
                 tag_indexes = tag_indexes[-n_best_tag_size:]
+                tag_probs = result.tag_logits['prob'][tag_indexes[0]]
+            elif loss_method == 'hierarchy' and n_best_tag_size > 1:
+                tag_indexes, tag_probs = result.tag_logits['index'], result.tag_logits['prob']
             else:
                 tag_indexes = _get_best_tags(result.tag_logits, n_best_tag_size, possible_values)
-            for tag_index in tag_indexes:
+            for ind in range(len(tag_indexes)):
+                tag_index = tag_indexes[ind]
                 if tag_index == 0:
                     continue
                 if loss_method == 'hierarchy':
-                    tag_logit = result.tag_logits['prob'][tag_index]  # TODO not reasonable yet
+                    if type(tag_probs) == float:
+                        tag_logit = tag_probs
+                    else:
+                        tag_logit = tag_probs[ind]  # TODO not reasonable yet
                 else:
                     tag_logit = result.tag_logits[tag_index]
                 tag_id = feature.app_tags[tag_index - feature.base_index]
@@ -814,7 +822,43 @@ def write_tag_predictions(loss_method, all_examples, all_features, all_results, 
     return None, all_tag_predictions
 
 
-def write_predictions(loss_method, all_examples, all_features, all_results, n_best_size, n_best_tag_size,
+def get_nbest_tags(base, app_tags, nb_size, logits):  # TODO stop margin
+    possible_values = [0] + [ind for ind in range(base, base + len(app_tags))]
+    stop_ind = len(logits[0])
+    index_and_score = []
+    for l in logits:
+        index_and_score.append(sorted(enumerate(l), key=lambda x: x[1], reverse=True))
+
+    def _get_next_nbest(prev):
+        # prev: list(tag_index: int, prob: float, stop_status: bool)
+        curr = []
+        for ind in prev:
+            if ind[0] == 0 or ind[3]:
+                curr.append(ind)
+                continue
+            cnt = 0
+            for item in index_and_score[ind[0]]:
+                if item[0] in possible_values:
+                    curr.append([item[0], ind[1] * item[1], False])
+                    cnt += 1
+                elif item[0] == stop_ind:
+                    curr.append([ind[0], ind[1] * item[1], True])
+                    cnt += 1
+                if cnt > nb_size:
+                    break
+        curr = sorted(curr, key=lambda x: x[1], reverse=True)
+        if len(curr) > nb_size:
+            curr = curr[:nb_size]
+        return curr, curr == prev
+
+    status, nb_results, step = False, [[base, 1, False]], 0
+    while not status and step <= len(app_tags):
+        step += 1
+        nb_results, status = _get_next_nbest(nb_results)
+    return {'prob': nb_results[1], 'index': nb_results[0]}
+
+
+def write_predictions(loss_method, all_examples, all_features, all_results, n_best_size, n_best_tag_size, stop_margin,
                       max_answer_length, do_lower_case, output_prediction_file, output_tag_prediction_file,
                       output_nbest_file, verbose_logging, write_pred):
     """Write final predictions to the json file and log-odds of null if needed."""
@@ -848,14 +892,17 @@ def write_predictions(loss_method, all_examples, all_features, all_results, n_be
             result = unique_id_to_result[feature.unique_id]
             possible_values = [0] + [ind for ind in range(feature.base_index,
                                                           feature.base_index + len(feature.app_tags))]
-            if loss_method == 'hierarchy':
+            if loss_method == 'hierarchy' and n_best_tag_size == 1:
                 curr = feature.base_index
                 tag_indexes = [curr]
                 while result.tag_logits['index'][curr] in possible_values and curr != 0 \
-                        and len(tag_indexes) < len(feature.app_tags):
+                        and len(tag_indexes) < len(feature.app_tags) \
+                        and result.tag_logits['prob'][curr] >= stop_margin:
                     curr = result.tag_logits['index'][curr]
                     tag_indexes.append(curr)
                 tag_indexes = tag_indexes[-n_best_tag_size:]
+            elif loss_method == 'hierarchy' and n_best_tag_size >= 1:
+                raise NotImplementedError()
             else:
                 tag_indexes = _get_best_tags(result.tag_logits, n_best_tag_size, possible_values)
             start_indexes = _get_best_indexes(result.start_logits, n_best_size)
@@ -998,7 +1045,7 @@ def write_predictions(loss_method, all_examples, all_features, all_results, n_be
 
 
 def write_predictions_provided_tag(all_examples, all_features, all_results, n_best_size, max_answer_length,
-                                   do_lower_case, output_prediction_file, output_tag_prediction_file,
+                                   do_lower_case, output_prediction_file, input_tag_prediction_file,
                                    output_refined_tag_prediction_file, output_nbest_file, verbose_logging, write_pred):
     logger.info("Writing predictions to: %s" % output_prediction_file)
     logger.info("Writing nbest to: %s" % output_nbest_file)
@@ -1030,49 +1077,51 @@ def write_predictions_provided_tag(all_examples, all_features, all_results, n_be
     all_predictions = collections.OrderedDict()
     all_nbest_json = collections.OrderedDict()
     all_refined_tag_predictions = collections.OrderedDict()
-    all_tag_predictions = json.load(open(output_tag_prediction_file))
+    all_tag_predictions = json.load(open(input_tag_prediction_file))
 
     for (example_index, example) in enumerate(all_examples):
         features = example_index_to_features[example_index]
-        tag_pred = all_tag_predictions[example.qas_id][0]['tag_id']
+        nb_tag_pred = all_tag_predictions[example.qas_id]
 
         prelim_predictions = []
         for (feature_index, feature) in enumerate(features):
             result = unique_id_to_result[feature.unique_id]
-            if tag_pred not in feature.app_tags:
-                continue
-            tag_index = feature.app_tags.index(tag_pred) + feature.base_index
-            left_bound, right_bound = feature.tag_to_token_index[tag_index]
-            start_indexes = _get_best_indexes(result.start_logits[left_bound:right_bound + 1], n_best_size)
-            end_indexes = _get_best_indexes(result.end_logits[left_bound:right_bound + 1], n_best_size)
-            start_indexes = [ind + left_bound for ind in start_indexes]
-            end_indexes = [ind + left_bound for ind in end_indexes]
-            tag_logit = all_tag_predictions[example.qas_id][0]['tag_logit']
-            for start_index in start_indexes:
-                for end_index in end_indexes:
-                    # We could hypothetically create invalid predictions, e.g., predict
-                    # that the start of the span is in the question. We throw out all
-                    # invalid predictions.
-                    if not feature.token_is_max_context.get(start_index, False):
-                        continue
-                    if end_index < start_index:
-                        continue
-                    length = end_index - start_index + 1
-                    if length > max_answer_length:
-                        continue
-                    tag_ids = _get_tag_id(feature.tag_to_token_index,
-                                          start_index, end_index,
-                                          feature.base_index, feature.app_tags)
-                    prelim_predictions.append(
-                        _PrelimPrediction(
-                            feature_index=feature_index,
-                            tag_index=tag_index,
-                            start_index=start_index,
-                            end_index=end_index,
-                            tag_logit=tag_logit,
-                            start_logit=result.start_logits[start_index],
-                            end_logit=result.end_logits[end_index],
-                            tag_id=tag_ids))
+            for item in nb_tag_pred:
+                tag_pred = item['tag_id']
+                if tag_pred not in feature.app_tags:
+                    continue
+                tag_index = feature.app_tags.index(tag_pred) + feature.base_index
+                left_bound, right_bound = feature.tag_to_token_index[tag_index]
+                start_indexes = _get_best_indexes(result.start_logits[left_bound:right_bound + 1], n_best_size)
+                end_indexes = _get_best_indexes(result.end_logits[left_bound:right_bound + 1], n_best_size)
+                start_indexes = [ind + left_bound for ind in start_indexes]
+                end_indexes = [ind + left_bound for ind in end_indexes]
+                tag_logit = item['tag_logit']
+                for start_index in start_indexes:
+                    for end_index in end_indexes:
+                        # We could hypothetically create invalid predictions, e.g., predict
+                        # that the start of the span is in the question. We throw out all
+                        # invalid predictions.
+                        if not feature.token_is_max_context.get(start_index, False):
+                            continue
+                        if end_index < start_index:
+                            continue
+                        length = end_index - start_index + 1
+                        if length > max_answer_length:
+                            continue
+                        tag_ids = _get_tag_id(feature.tag_to_token_index,
+                                              start_index, end_index,
+                                              feature.base_index, feature.app_tags)
+                        prelim_predictions.append(
+                            _PrelimPrediction(
+                                feature_index=feature_index,
+                                tag_index=tag_index,
+                                start_index=start_index,
+                                end_index=end_index,
+                                tag_logit=tag_logit,
+                                start_logit=result.start_logits[start_index],
+                                end_logit=result.end_logits[end_index],
+                                tag_id=tag_ids))
         prelim_predictions = sorted(
             prelim_predictions,
             key=lambda x: (x.start_logit + x.end_logit),
@@ -1103,10 +1152,9 @@ def write_predictions_provided_tag(all_examples, all_features, all_results, n_be
             orig_text = " ".join(orig_tokens)
 
             final_text = get_final_text(tok_text, orig_text, do_lower_case, verbose_logging)
-            if final_text in seen_predictions:
+            if '{} with the tag_id of {}'.format(final_text, str(pred.tag_index)) in seen_predictions:
                 continue
-
-            seen_predictions[final_text] = True
+            seen_predictions['{} with the tag_id of {}'.format(final_text, str(pred.tag_index))] = True
 
             nbest.append(
                 _NBestPrediction(
