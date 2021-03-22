@@ -833,7 +833,7 @@ def get_nbest_tags(base, app_tags, nb_size, logits):  # TODO stop margin
         # prev: list(tag_index: int, prob: float, stop_status: bool)
         curr = []
         for ind in prev:
-            if ind[0] == 0 or ind[3]:
+            if ind[0] == 0 or ind[2]:
                 curr.append(ind)
                 continue
             cnt = 0
@@ -851,7 +851,7 @@ def get_nbest_tags(base, app_tags, nb_size, logits):  # TODO stop margin
             curr = curr[:nb_size]
         return curr, curr == prev
 
-    status, nb_results, step = False, [[base, 1, False]], 0
+    status, nb_results, step = False, [[base, 1., False]], 0
     while not status and step <= len(app_tags):
         step += 1
         nb_results, status = _get_next_nbest(nb_results)
@@ -1331,7 +1331,7 @@ def _get_best_tags(logits, n_best_size, possible_values):
     for i in range(len(index_and_score)):
         if index_and_score[i][0] not in possible_values:
             continue
-        if i >= n_best_size:
+        if len(best_indexes) >= n_best_size:
             break
         best_indexes.append(index_and_score[i][0])
     return best_indexes

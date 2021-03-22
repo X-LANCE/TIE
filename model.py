@@ -286,10 +286,10 @@ class GraphHtmlBert(BertPreTrainedModel):
         extended_gat_mask = convert_mask_to_reality(extended_gat_mask)
         gat_outputs = self.gat(gat_inputs, attention_mask=extended_gat_mask, head_mask=head_mask)
         final_outputs = gat_outputs[0]
-        if self.loss_method == 'hierarchy':
-            for ind in range(final_outputs.size(0)):
-                question_emb = final_outputs[ind, 1:base_ind[ind] - 1, :].mean(dim=0, keepdim=True)
-                final_outputs[ind] = final_outputs[ind] + question_emb
+        # if self.loss_method == 'hierarchy':
+        #     for ind in range(final_outputs.size(0)):
+        #         question_emb = final_outputs[ind, 1:base_ind[ind] - 1, :].mean(dim=0, keepdim=True)
+        #         final_outputs[ind] = final_outputs[ind] + question_emb
         tag_logits = self.gat_outputs(final_outputs)
         tag_logits = tag_logits.squeeze(-1)
         if self.loss_method == 'hierarchy':
