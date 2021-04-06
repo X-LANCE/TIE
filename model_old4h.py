@@ -1,7 +1,7 @@
 #!/usr/bin/python
 # -*- coding: utf-8 -*-
-import os
-import json
+import math
+from copy import deepcopy
 
 import torch
 import torch.nn as nn
@@ -10,7 +10,7 @@ from transformers import PretrainedConfig
 from torch.utils.data import Dataset
 import numpy as np
 
-from utils import form_tree_mask, form_spatial_mask
+from utils import form_tree_mask
 
 
 class SubDataset(Dataset):
@@ -51,7 +51,10 @@ class SubDataset(Dataset):
         else:
             all_answer_tid = torch.tensor([f.answer_tid for f in features],
                                           dtype=torch.long if self.loss_method != 'soft' else torch.float)
-            self.dataset = StrucDataset(all_input_ids, all_input_mask, all_segment_ids, all_answer_tid, all_tag_depth,
+            all_start_positions = torch.tensor([f.start_position for f in features], dtype=torch.long)
+            all_end_positions = torch.tensor([f.end_position for f in features], dtype=torch.long)
+            self.dataset = StrucDataset(all_input_ids, all_input_mask, all_segment_ids,
+                                        all_answer_tid, all_start_positions, all_end_positions, all_tag_depth,
                                         gat_mask=(all_app_tags, all_example_index, self.all_html_trees),
                                         base_index=all_base_index, tag2tok=all_tag_to_token, shape=self.shape,
                                         training=True, separate=self.separate)
@@ -80,8 +83,8 @@ class StrucDataset(Dataset):
         *tensors (Tensor): tensors that have the same size of the first dimension.
     """
 
-    def __init__(self, *tensors, gat_mask=None, base_index=None, tag2tok=None, shape=None, training=True,
-                 page_id=None, mask_method=1, mask_dir=None, separate=False):
+    def __init__(self, *tensors, gat_mask=None, base_index=None, tag2tok=None,
+                 shape=None, training=True, separate=False):
         tensors = tuple(tensor for tensor in tensors if tensor is not None)
         assert all(len(tensors[0]) == len(tensor) for tensor in tensors)
         self.tensors = tensors
@@ -90,10 +93,6 @@ class StrucDataset(Dataset):
         self.tag2tok = tag2tok
         self.shape = shape
         self.training = training
-        self.page_id = page_id
-        self.mask_method = mask_method
-        self.mask_dir = mask_dir
-        self._init_spatial_mask()
         self.separate = separate
 
     def __getitem__(self, index):
@@ -104,27 +103,19 @@ class StrucDataset(Dataset):
         example_index = self.gat_mask[1][index]
         html_tree = self.gat_mask[2][example_index]
         base = self.base_index[index]
+        output.append(base)
 
-        if self.spatial_mask is not None:
-            if self.mask_method < 5:
-                spa_mask = torch.zeros((4, self.shape[0], self.shape[0]), dtype=torch.long)
-            elif self.mask_method < 7:
-                spa_mask = torch.zeros((2, self.shape[0], self.shape[0]), dtype=torch.long)
-            else:
-                raise NotImplementedError()
-            temp = form_spatial_mask(app_tags, self.spatial_mask[self.page_id[index]], self.mask_method)
-            spa_mask[:, base:base + len(app_tags), base:base + len(app_tags)] = torch.tensor(temp)
-            output.append(spa_mask)
-
-        gat_mask = torch.zeros((1, self.shape[0], self.shape[0]), dtype=torch.long)
+        gat_mask = torch.zeros((self.shape[0], self.shape[0]), dtype=torch.long)
         gat_mask[:, :len(tag_to_token_index)] = 1
         temp = torch.tensor(form_tree_mask(app_tags, html_tree, separate=self.separate))
         if self.separate:  # TODO multiple mask and variable total head number implementation
-            gat_mask = gat_mask.repeat(2, 1, 1)
-            gat_mask[:, base:base + len(app_tags), base:base + len(app_tags)] = torch.tensor(temp[0:2])
+            gat_mask = gat_mask.unsqueeze(0).repeat(2, 1, 1)
+            gat_mask[0, base:base + len(app_tags), base:base + len(app_tags)] = torch.tensor(temp[0])
+            gat_mask[1, base:base + len(app_tags), base:base + len(app_tags)] = torch.tensor(temp[1])
+            gat_mask = gat_mask.repeat(6, 1, 1)
             tree_children = torch.tensor(temp[2])
         else:
-            gat_mask[:, base:base + len(app_tags), base:base + len(app_tags)] = torch.tensor(temp[0])
+            gat_mask[base:base + len(app_tags), base:base + len(app_tags)] = torch.tensor(temp[0])
             tree_children = torch.tensor(temp[1])
         output.append(gat_mask)
 
@@ -146,20 +137,6 @@ class StrucDataset(Dataset):
     def __len__(self):
         return len(self.tensors[0])
 
-    def _init_spatial_mask(self):
-        if self.mask_dir is None:
-            self.spatial_mask = None
-            return
-        self.spatial_mask = {}
-        for d, _, fs in os.walk(self.mask_dir):
-            for f in fs:
-                if not f.endswith('.spatial.json'):
-                    continue
-                domain = d.split('/')[-3][:2]
-                page = f.split('.')[0]
-                self.spatial_mask[domain + page] = json.load(open(os.path.join(d, f)))
-        return
-
 
 class GraphHtmlConfig(PretrainedConfig):
     def __init__(self,
@@ -173,7 +150,6 @@ class GraphHtmlConfig(PretrainedConfig):
         self.loss_method = args.loss_method
         self.num_hidden_layers = args.num_node_block
         self.max_depth_embeddings = args.max_depth_embeddings
-        self.mask_method = args.mask_method
 
 
 class Link(nn.Module):
@@ -215,6 +191,20 @@ class Link(nn.Module):
             temp[:, i] /= s
         return temp
 
+    # def deduce_child(self, gat_mask):
+    #     if self.loss_method != 'hierarchy':
+    #         return None
+    #     assert gat_mask.dim() == 3
+    #     child = deepcopy(gat_mask)
+    #     l = gat_mask.size(1)
+    #     for i in range(l):
+    #         child[:, i, i] = 0
+    #     for i in range(l):
+    #         for j in range(i + 1, l):
+    #             temp = child[:, j, j].unsqueeze(dim=1) * child[:, j]
+    #             child[:, i] = (child[:, i] - temp) > 0
+    #     return child
+
 
 def convert_mask_to_reality(mask, dtype=torch.float):
     mask = mask.to(dtype=dtype)
@@ -228,9 +218,10 @@ class GraphHtmlBert(BertPreTrainedModel):
         self.method = config.method
         self.base_type = config.model_type
         self.loss_method = config.loss_method
-        self.mask_method = config.mask_method
         if config.model_type == 'bert':
             self.ptm = PTMForQA.bert
+        elif config.model_type == 'albert':
+            self.ptm = PTMForQA.albert
         elif config.model_type == 'electra':
             self.ptm = PTMForQA.electra
         else:
@@ -238,21 +229,32 @@ class GraphHtmlBert(BertPreTrainedModel):
         self.link = Link(self.method, config)
         self.num_gat_layers = config.num_hidden_layers
         self.gat = BertEncoder(config)
-        self.gat_outputs = nn.Linear(config.hidden_size, 1)
+        self.qa_outputs = nn.Linear(config.hidden_size, 2)
+        self.hidden_size = config.hidden_size
+        self.scale = math.sqrt(self.hidden_size // 2)
+        if self.loss_method == 'hierarchy':
+            self.gat_outputs = nn.Linear(config.hidden_size, config.hidden_size)
+            self.stop_margin = torch.nn.Parameter(torch.randn(1, dtype=torch.float), requires_grad=True)
+        else:
+            self.gat_outputs = nn.Linear(config.hidden_size, 1)
+            self.stop_margin = None
 
     def forward(
             self,
             input_ids,
             attention_mask=None,
             gat_mask=None,
-            spa_mask=None,
+            children=None,
             token_type_ids=None,
             position_ids=None,
             head_mask=None,
             inputs_embeds=None,
+            start_positions=None,
+            end_positions=None,
             answer_tid=None,
             tag_to_tok=None,
             tag_depth=None,
+            base_ind=None,
     ):
 
         outputs = self.ptm(
@@ -266,33 +268,64 @@ class GraphHtmlBert(BertPreTrainedModel):
         sequence_output = outputs[0]
         outputs = outputs[2:]
 
+        logits = self.qa_outputs(sequence_output)
+        start_logits, end_logits = logits.split(1, dim=-1)
+        start_logits = start_logits.squeeze(-1)
+        end_logits = end_logits.squeeze(-1)
+        outputs = (start_logits, end_logits,) + outputs
+
         gat_inputs = self.link(sequence_output, tag_to_tok, tag_depth)
-        if self.mask_method != 0:
-            if gat_mask.size(1) == 1:
-                gat_mask = gat_mask.repeat(1, 4, 1, 1)
-            else:
-                gat_mask = gat_mask.repeat(1, 2, 1, 1)
-            if self.mask_method < 5:
-                spa_mask = spa_mask.repeat(1, 2, 1, 1)
-            elif self.mask_method < 7:
-                spa_mask = spa_mask.repeat(1, 4, 1, 1)
-            else:
-                raise NotImplementedError()
-            gat_mask = torch.cat([gat_mask, spa_mask], dim=1)
-        elif gat_mask.size(1) != 1:
-            gat_mask = gat_mask.repeat(1, 6, 1, 1)
         if head_mask is None:
             head_mask = [None] * self.num_gat_layers
-        extended_gat_mask = convert_mask_to_reality(gat_mask)
+        if gat_mask.dim() == 3:
+            extended_gat_mask = gat_mask[:, None, :, :]
+        elif gat_mask.dim() == 4:
+            extended_gat_mask = gat_mask
+        else:
+            raise ValueError('Wrong dim num for gat_mask, whose size is {}'.format(gat_mask.size()))
+        extended_gat_mask = convert_mask_to_reality(extended_gat_mask)
         gat_outputs = self.gat(gat_inputs, attention_mask=extended_gat_mask, head_mask=head_mask)
         final_outputs = gat_outputs[0]
+        # if self.loss_method == 'hierarchy':
+        #     for ind in range(final_outputs.size(0)):
+        #         question_emb = final_outputs[ind, 1:base_ind[ind] - 1, :].mean(dim=0, keepdim=True)
+        #         final_outputs[ind] = final_outputs[ind] + question_emb
         tag_logits = self.gat_outputs(final_outputs)
         tag_logits = tag_logits.squeeze(-1)
-        if 'multi' in self.loss_method:
+        if self.loss_method == 'hierarchy':
+            tag_logits = torch.matmul(tag_logits[:, :, :self.hidden_size // 2],
+                                      tag_logits[:, :, self.hidden_size // 2:].permute(0, 2, 1))
+            tag_logits = tag_logits / self.scale
+            children = convert_mask_to_reality(children)
+            tag_logits = tag_logits + children
+            b, t, _ = tag_logits.size()
+            tag_logits = torch.cat([tag_logits,
+                                    self.stop_margin.unsqueeze(0).unsqueeze(0).repeat((b, t, 1))], dim=2)
+            tag_probs = torch.softmax(tag_logits, dim=2)
+            prob, index = tag_probs.max(dim=2)
+            outputs = (tag_probs, prob, index,) + outputs
+        elif 'multi' in self.loss_method:
             tag_prob = nn.functional.sigmoid(tag_logits)
             outputs = (tag_prob,) + outputs
         else:
             outputs = (tag_logits,) + outputs
+
+        if start_positions is not None and end_positions is not None:
+            # If we are on multi-GPU, split add a dimension
+            if len(start_positions.size()) > 1:
+                start_positions = start_positions.squeeze(-1)
+            if len(end_positions.size()) > 1:
+                end_positions = end_positions.squeeze(-1)
+            # sometimes the start/end positions are outside our model inputs, we ignore these terms
+            ignored_index = start_logits.size(1)
+            start_positions.clamp_(0, ignored_index)
+            end_positions.clamp_(0, ignored_index)
+
+            loss_fct = torch.nn.CrossEntropyLoss(ignore_index=ignored_index)
+            start_loss = loss_fct(start_logits, start_positions)
+            end_loss = loss_fct(end_logits, end_positions)
+            total_loss = (start_loss + end_loss) / 2
+            outputs = (total_loss,) + outputs
 
         if answer_tid is not None:
             if len(answer_tid.size()) > 1:
@@ -305,6 +338,12 @@ class GraphHtmlBert(BertPreTrainedModel):
                 answer_tid.clamp_(0, 1)
                 tag_logits = torch.nn.functional.log_softmax(tag_logits, dim=1)
                 loss_fct = torch.nn.KLDivLoss(reduction='batchmean')
+            elif self.loss_method == 'hierarchy':
+                answer_tid.clamp_(-1, tag_logits.size(1))
+                loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-1)
+                b, t = answer_tid.size()
+                tag_logits = tag_logits.reshape((b * t, -1))
+                answer_tid = answer_tid.reshape((b * t))
             elif 'multi' in self.loss_method:
                 answer_tid.clamp_(0, 1)
                 tag_logits = nn.functional.sigmoid(tag_logits)
@@ -315,6 +354,6 @@ class GraphHtmlBert(BertPreTrainedModel):
             outputs = (loss,) + outputs
 
         return outputs
-        # (loss), tag_logits/probs, (hidden_states), (attentions)
+        # (loss), (total_loss), tag_logits, (prob, index), start_logits, end_logits, (hidden_states), (attentions)
 
 

@@ -35,14 +35,14 @@ from transformers import (
     AdamW,
     AutoConfig,
     AutoModelForQuestionAnswering,
-    AutoTokenizer, BertTokenizer, AlbertTokenizer, ElectraTokenizer,
+    AutoTokenizer, BertTokenizer, ElectraTokenizer,
     get_linear_schedule_with_warmup,
 )
 
 
 from model import GraphHtmlConfig, GraphHtmlBert, StrucDataset, SubDataset
-from utils import read_squad_examples, convert_examples_to_features, RawResult, write_predictions, \
-    write_tag_predictions, write_predictions_provided_tag, get_nbest_tags
+from utils import read_squad_examples, convert_examples_to_features, RawResult, RawTagResult,\
+    write_tag_predictions, write_predictions_provided_tag
 
 # The following import is the official SQuAD evaluation script (2.0).
 # You can remove it from the dependencies if you are using this script outside of the library
@@ -161,22 +161,31 @@ def train(args, train_dataset, model, tokenizer):
     set_seed(args)  # Added here for reproductibility (even between python 2 and 3)
     for _ in train_iterator:
         epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
+        # LOCAL
+        batch_start_time = timeit.default_timer()
+        ft, ct = [], []
+
         for step, batch in enumerate(epoch_iterator):
             model.train()
             batch = tuple(t.to(args.device) for t in batch)
+            # LOCAL
+            ft.append(timeit.default_timer() - batch_start_time)
+            current_time = timeit.default_timer()
+
             inputs = {'input_ids'      : batch[0],
                       'attention_mask' : batch[1],
                       'token_type_ids' : batch[2],
                       'answer_tid'     : batch[3],
-                      'start_positions': batch[4],
-                      'end_positions'  : batch[5],
                       'tag_depth'      : batch[6],
-                      'base_ind'       : batch[-4],
                       'gat_mask'       : batch[-3],
-                      'children'       : batch[-2],
                       'tag_to_tok'     : batch[-1]}
+            if args.mask_method != 0:
+                inputs.update({'spa_mask' : batch[-4]})
             outputs = model(**inputs)
-            loss = outputs[0] + args.loss_gamma * outputs[1]
+            # LOCAL
+            ct.append(timeit.default_timer() - current_time)
+
+            loss = outputs[0]
 
             if args.n_gpu > 1:
                 loss = loss.mean()  # mean() to average on multi-gpu parallel (not distributed) training
@@ -229,6 +238,12 @@ def train(args, train_dataset, model, tokenizer):
             if 0 < args.max_steps < global_step:
                 epoch_iterator.close()
                 break
+            # LOCAL
+            batch_start_time = timeit.default_timer()
+
+        # LOCAL
+        print('Fetch Time: {}\nCompute Time: {}'.format(str(sum(ft) / len(ft)), str(sum(ct) / len(ct))))
+
         if 0 < args.max_steps < global_step:
             train_iterator.close()
             break
@@ -264,7 +279,7 @@ def evaluate(args, model, tokenizer, prefix="", write_pred=True):
         model.eval()
         batch = tuple(t.to(args.device) for t in batch)
         with torch.no_grad():
-            if args.resume_from_PLM is not None:
+            if args.provided_tag_pred is not None:
                 inputs = {'input_ids': batch[0],
                           'attention_mask': batch[1],
                           'token_type_ids': batch[2]}
@@ -273,40 +288,29 @@ def evaluate(args, model, tokenizer, prefix="", write_pred=True):
                           'attention_mask' : batch[1],
                           'token_type_ids' : batch[2],
                           'tag_depth'      : batch[4],
-                          'base_ind'       : batch[-4],
                           'gat_mask'       : batch[-3],
-                          'children'       : batch[-2],
+                          'spa_mask'       : batch[-4],
                           'tag_to_tok'     : batch[-1]}
+                if args.mask_method != 0:
+                    inputs.update({'spa_mask' : batch[-4]})
             feature_indices = batch[3]
             outputs = model(**inputs)
 
         for i, feature_index in enumerate(feature_indices):
             eval_feature = features[feature_index.item()]
             unique_id = int(eval_feature.unique_id)
-            if args.resume_from_PLM is not None:
+            if args.provided_tag_pred is not None:
                 result = RawResult(unique_id=unique_id,
-                                   tag_logits=None,
                                    start_logits=to_list(outputs[0][i]),
                                    end_logits=to_list(outputs[1][i]))
-            elif args.loss_method == 'hierarchy':
-                if args.n_best_tag_size > 1:
-                    tag_logits = get_nbest_tags(eval_feature.base_index, eval_feature.app_tags,
-                                                args.n_best_tag_size, outputs[0][i])
-                    result = RawResult(unique_id=unique_id,
-                                       tag_logits=tag_logits,
-                                       start_logits=to_list(outputs[3][i]),
-                                       end_logits=to_list(outputs[4][i]))
-                else:
-                    result = RawResult(unique_id=unique_id,
-                                       tag_logits={'prob': to_list(outputs[1][i]),
-                                                   'index': to_list(outputs[2][i])},
-                                       start_logits=to_list(outputs[3][i]),
-                                       end_logits=to_list(outputs[4][i]))
+            elif args.loss_method == 'multi-hierarchy':
+                result = RawTagResult(unique_id=unique_id,
+                                      tag_logits={'logits': to_list(to_list(outputs[0][i])),
+                                                  'children': [np.where(np.array(t))[0].tolist()
+                                                               for t in to_list(batch[-2][i])]})
             else:
-                result = RawResult(unique_id=unique_id,
-                                   tag_logits=to_list(outputs[0][i]),
-                                   start_logits=to_list(outputs[1][i]),
-                                   end_logits=to_list(outputs[2][i]))
+                result = RawTagResult(unique_id=unique_id,
+                                      tag_logits=to_list(outputs[0][i]))
             all_results.append(result)
 
     eval_time = timeit.default_timer() - start_time
@@ -324,16 +328,12 @@ def evaluate(args, model, tokenizer, prefix="", write_pred=True):
                                                  args.max_answer_length, args.do_lower_case, output_prediction_file,
                                                  args.provided_tag_pred, output_tag_prediction_file, output_nbest_file,
                                                  args.verbose_logging, write_pred=write_pred)
-    elif args.loss_gamma == 0:
+    else:
         # TODO n best tag size greater than 1
         returns = write_tag_predictions(args.loss_method, examples, features, all_results, 1, args.stop_margin,
                                         output_tag_prediction_file, output_nbest_file, write_pred=write_pred)
         output_prediction_file = None
-    else:
-        returns = write_predictions(args.loss_method, examples, features, all_results, args.n_best_size, 1,
-                                    args.stop_margin, args.max_answer_length, args.do_lower_case,
-                                    output_prediction_file, output_tag_prediction_file, output_nbest_file,
-                                    args.verbose_logging, write_pred=write_pred)  # TODO n best tag size greater than 1
+
     if not write_pred:
         output_prediction_file, output_tag_prediction_file = returns
 
@@ -359,8 +359,10 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
         list(filter(None, args.model_name_or_path.split('/'))).pop(),
         str(args.max_seq_length)))
     cached_features_file = '{}_{}'.format(base_cached_features_file,
-                                          args.loss_method if args.loss_method != 'soft'
+                                          args.loss_method if 'soft' not in args.loss_method
                                           else '{}_{}'.format(args.soft_remain, args.soft_decay))
+    # if args.mask_method != 0:
+    #     cached_features_file += '_spatial'
 
     if os.path.exists(cached_features_file) and not args.overwrite_cache and not args.enforce:
         logger.info("Loading features from cached file %s", cached_features_file)
@@ -446,23 +448,25 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
     all_html_trees = [e.html_tree for e in examples]
     all_base_index = [f.base_index for f in features]
     all_tag_to_token = [f.tag_to_token_index for f in features]
+    all_page_id = [f.page_id for f in features]
 
     if evaluate:
         all_feature_index = torch.arange(all_input_ids.size(0), dtype=torch.long)
         dataset = StrucDataset(all_input_ids, all_input_mask, all_segment_ids, all_feature_index, all_tag_depth,
                                gat_mask=(all_app_tags, all_example_index, all_html_trees), base_index=all_base_index,
                                tag2tok=all_tag_to_token, shape=(args.max_tag_length, args.max_seq_length),
-                               training=False, separate=args.separate_mask)
+                               training=False, page_id=all_page_id, mask_method=args.mask_method,
+                               mask_dir=os.path.dirname(input_file) if args.mask_method != 0 else None,
+                               separate=args.separate_mask)
     else:
         all_answer_tid = torch.tensor([f.answer_tid for f in features],
-                                      dtype=torch.long if args.loss_method != 'soft' else torch.float)
-        all_start_positions = torch.tensor([f.start_position for f in features], dtype=torch.long)
-        all_end_positions = torch.tensor([f.end_position for f in features], dtype=torch.long)
-        dataset = StrucDataset(all_input_ids, all_input_mask, all_segment_ids,
-                               all_answer_tid, all_start_positions, all_end_positions, all_tag_depth,
+                                      dtype=torch.long if 'soft' not in args.loss_method else torch.float)
+        dataset = StrucDataset(all_input_ids, all_input_mask, all_segment_ids, all_answer_tid, all_tag_depth,
                                gat_mask=(all_app_tags, all_example_index, all_html_trees), base_index=all_base_index,
                                tag2tok=all_tag_to_token, shape=(args.max_tag_length, args.max_seq_length),
-                               training=True, separate=args.separate_mask)
+                               training=True, page_id=all_page_id, mask_method=args.mask_method,
+                               mask_dir=os.path.dirname(input_file) if args.mask_method != 0 else None,
+                               separate=args.separate_mask)
 
     if evaluate:
         dataset = (dataset, examples, features)
@@ -539,9 +543,9 @@ def main():
                         help="If true, all of the warnings related to data processing will be printed. "
                              "A number of warnings are expected for a normal SQuAD evaluation.")
 
-    parser.add_argument('--logging_steps', type=int, default=50,
+    parser.add_argument('--logging_steps', type=int, default=3000,
                         help="Log every X updates steps.")
-    parser.add_argument('--save_steps', type=int, default=50,
+    parser.add_argument('--save_steps', type=int, default=3000,
                         help="Save checkpoint every X updates steps.")
     parser.add_argument("--eval_all_checkpoints", action='store_true',
                         help="Evaluate all checkpoints starting with the same prefix as model_name ending and ending "
@@ -588,16 +592,17 @@ def main():
     parser.add_argument('--evaluate_split', type=str, default='dev', choices=['dev', 'test', 'train'])
     parser.add_argument('--max_depth_embeddings', type=int, default=None,
                         help='Set to the max depth embedding for node if want to use the position embeddings')
-    parser.add_argument('--loss_method', type=str, default='base', choices=['base', 'soft', 'hierarchy'])
-    parser.add_argument('--soft_remain', type=float, default=0.8)
+    parser.add_argument('--loss_method', type=str, default='base', choices=['base', 'soft', 'multi',
+                                                                            'multi-soft', 'multi-hierarchy'])
+    parser.add_argument('--soft_remain', type=float, default=0.7)
     parser.add_argument('--soft_decay', type=float, default=0.5)
-    parser.add_argument('--loss_gamma', type=float, default=1)
     parser.add_argument('--separate_mask', action='store_true')
     parser.add_argument('--resume_from_PLM', type=str, default=None,
                         help='the path of the folder contains the state dict file and the tokenizer')
     parser.add_argument('--provided_tag_pred', type=str, default=None)
     parser.add_argument('--stop_margin', type=float, default=0.5)
     parser.add_argument('--n_best_tag_size', type=int, default=1)
+    parser.add_argument('--mask_method', type=int, default=1)
     args = parser.parse_args()
 
     if os.path.exists(args.output_dir) and os.listdir(

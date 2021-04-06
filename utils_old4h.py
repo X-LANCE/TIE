@@ -21,6 +21,7 @@ import json
 import logging
 import math
 import collections
+import sys
 from io import open
 from os import path as osp
 import random
@@ -423,7 +424,16 @@ def convert_examples_to_features(examples, tokenizer, loss_method, max_seq_lengt
                 if temp != 0:
                     marker[origin_answer_tid] = temp * soft_remain / (1 - soft_remain)
                     marker /= marker.sum()
-        if loss_method in ['multi', 'multi-hierarchy']:
+        if loss_method == 'hierarchy':
+            labels = np.zeros(max_tag_length, dtype=np.int) - 1
+            if marker[0] != 1:
+                labels[path[0]] = max_tag_length
+                for ind in range(1, len(path)):
+                    labels[path[ind]] = path[ind - 1]
+            else:
+                labels[base] = 0
+            answer_tid = labels.tolist()
+        elif loss_method in ['multi', 'multi-hierarchy']:
             marker[marker > 0] = 1
             marker = marker.astype(np.long)
             answer_tid = marker.tolist()
@@ -694,7 +704,8 @@ def _check_is_max_context(doc_spans, cur_span_index, position):
     return cur_span_index == best_span_index
 
 
-RawTagResult = collections.namedtuple("RawResult", ["unique_id", "tag_logits"])
+RawResult = collections.namedtuple("RawResult",
+                                   ["unique_id", "tag_logits", "start_logits", "end_logits"])
 
 
 def write_tag_predictions(loss_method, all_examples, all_features, all_results, n_best_tag_size, stop_margin,
@@ -724,7 +735,19 @@ def write_tag_predictions(loss_method, all_examples, all_features, all_results, 
             result = unique_id_to_result[feature.unique_id]
             possible_values = [ind for ind in range(feature.base_index,
                                                     feature.base_index + len(feature.app_tags))]
-            if loss_method == 'multi':
+            if loss_method == 'hierarchy' and n_best_tag_size == 1:
+                curr = feature.base_index
+                tag_indexes = [curr]
+                while result.tag_logits['index'][curr] in possible_values and curr != 0 \
+                        and len(tag_indexes) < len(feature.app_tags) \
+                        and result.tag_logits['prob'][curr] >= stop_margin:
+                    curr = result.tag_logits['index'][curr]
+                    tag_indexes.append(curr)
+                tag_indexes = tag_indexes[-n_best_tag_size:]
+                tag_probs = result.tag_logits['prob'][tag_indexes[0]]
+            elif loss_method == 'hierarchy' and n_best_tag_size > 1:
+                tag_indexes, tag_probs = result.tag_logits['index'], result.tag_logits['prob']
+            elif loss_method == 'multi':
                 depth = np.array(feature.depth, dtype=np.float)
                 tag_probs = np.array(result.tag_logits, dtype=np.float)
                 tag_probs = tag_probs * (0.5 + 0.5 * (depth / depth.max()))
@@ -744,7 +767,12 @@ def write_tag_predictions(loss_method, all_examples, all_features, all_results, 
                 tag_index = tag_indexes[ind]
                 if tag_index == 0:
                     continue
-                if loss_method == 'multi-hierarchy':
+                if loss_method == 'hierarchy':
+                    if type(tag_probs) == float:
+                        tag_logit = tag_probs
+                    else:
+                        tag_logit = tag_probs[ind]  # TODO not reasonable yet
+                elif loss_method == 'multi-hierarchy':
                     tag_logit = result.tag_logits['logits'][tag_index]
                 else:
                     tag_logit = result.tag_logits[tag_index]
@@ -813,7 +841,40 @@ def write_tag_predictions(loss_method, all_examples, all_features, all_results, 
     return None, all_tag_predictions
 
 
-RawResult = collections.namedtuple("RawResult", ["unique_id", "start_logits", "end_logits"])
+def get_nbest_tags(base, app_tags, nb_size, logits):  # TODO stop margin
+    possible_values = [0] + [ind for ind in range(base, base + len(app_tags))]
+    stop_ind = len(logits[0])
+    index_and_score = []
+    for l in logits:
+        index_and_score.append(sorted(enumerate(l), key=lambda x: x[1], reverse=True))
+
+    def _get_next_nbest(prev):
+        # prev: list(tag_index: int, prob: float, stop_status: bool)
+        curr = []
+        for ind in prev:
+            if ind[0] == 0 or ind[2]:
+                curr.append(ind)
+                continue
+            cnt = 0
+            for item in index_and_score[ind[0]]:
+                if item[0] in possible_values:
+                    curr.append([item[0], ind[1] * item[1], False])
+                    cnt += 1
+                elif item[0] == stop_ind:
+                    curr.append([ind[0], ind[1] * item[1], True])
+                    cnt += 1
+                if cnt > nb_size:
+                    break
+        curr = sorted(curr, key=lambda x: x[1], reverse=True)
+        if len(curr) > nb_size:
+            curr = curr[:nb_size]
+        return curr, curr == prev
+
+    status, nb_results, step = False, [[base, 1., False]], 0
+    while not status and step <= len(app_tags):
+        step += 1
+        nb_results, status = _get_next_nbest(nb_results)
+    return {'prob': nb_results[1], 'index': nb_results[0]}
 
 
 def write_predictions_provided_tag(all_examples, all_features, all_results, n_best_size, max_answer_length,
@@ -1174,52 +1235,3 @@ def form_tree_mask(app, tree, separate=False):
         adj[ind] = 1
         _unit(tree)
         return adj, children
-
-
-def form_spatial_mask(app, rel, method=1):
-    r"""
-    Arguments:
-        app
-        rel
-        method(int): 1-four direction, no contain link, no symmetric;
-                     2-four direction, no contain link, symmetric;
-                     3-four direction, contain link, no symmetric;
-                     4-four direction, contain link, symmetric;
-                     5-two direction, no symmetric;
-                     6-two direction, symmetric;
-                     7-six direction, TODO
-    """
-    def _form_direction_mask(rel, d):
-        mask = np.zeros((len(app), len(app)), dtype=np.int)
-        for k, v in rel[d].items():
-            try:
-                curr = app.index(int(k))
-            except ValueError:
-                continue
-            for t in v:
-                try:
-                    ter = app.index(int(t))
-                except ValueError:
-                    continue
-                mask[curr, ter] = 1
-                if method % 2 == 0:
-                    mask[ter, curr] = 1
-        return mask
-    if method < 3:
-        r = _form_direction_mask(rel, 'r')
-        l = _form_direction_mask(rel, 'l')
-        u = _form_direction_mask(rel, 'u')
-        d = _form_direction_mask(rel, 'd')
-        return np.stack([r, l, u, d])
-    elif method < 5:
-        r = _form_direction_mask(rel, 'rw')
-        l = _form_direction_mask(rel, 'lw')
-        u = _form_direction_mask(rel, 'uw')
-        d = _form_direction_mask(rel, 'dw')
-        return np.stack([r, l, u, d])
-    elif method < 7:
-        h = _form_direction_mask(rel, 'h')
-        v = _form_direction_mask(rel, 'v')
-        return np.stack([h, v])
-    else:
-        raise NotImplementedError()

@@ -3,3 +3,7 @@
 __pycache__
 __pycache__/*
 *.json
+result
+result/*
+runs
+runs/*
