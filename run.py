@@ -460,7 +460,7 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
                                separate=args.separate_mask)
     else:
         all_answer_tid = torch.tensor([f.answer_tid for f in features],
-                                      dtype=torch.long if 'soft' not in args.loss_method else torch.float)
+                                      dtype=torch.long if 'hard' in args.loss_method else torch.float)
         dataset = StrucDataset(all_input_ids, all_input_mask, all_segment_ids, all_answer_tid, all_tag_depth,
                                gat_mask=(all_app_tags, all_example_index, all_html_trees), base_index=all_base_index,
                                tag2tok=all_tag_to_token, shape=(args.max_tag_length, args.max_seq_length),

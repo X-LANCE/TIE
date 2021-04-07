@@ -425,7 +425,7 @@ def convert_examples_to_features(examples, tokenizer, loss_method, max_seq_lengt
                     marker /= marker.sum()
         if loss_method in ['multi', 'multi-hierarchy']:
             marker[marker > 0] = 1
-            marker = marker.astype(np.long)
+            marker = marker.astype(np.float)
             answer_tid = marker.tolist()
         else:
             answer_tid = marker.tolist()
