@@ -106,10 +106,12 @@ class StrucDataset(Dataset):
         base = self.base_index[index]
 
         if self.spatial_mask is not None:
-            if self.mask_method < 5:
+            if self.mask_method < 5 or self.mask_method == 8:
                 spa_mask = torch.zeros((4, self.shape[0], self.shape[0]), dtype=torch.long)
             elif self.mask_method < 7:
                 spa_mask = torch.zeros((2, self.shape[0], self.shape[0]), dtype=torch.long)
+            elif self.mask_method == 7:
+                spa_mask = torch.zeros((8, self.shape[0], self.shape[0]), dtype=torch.long)
             else:
                 raise NotImplementedError()
             temp = form_spatial_mask(app_tags, self.spatial_mask[self.page_id[index]], self.mask_method)
@@ -272,10 +274,12 @@ class GraphHtmlBert(BertPreTrainedModel):
                 gat_mask = gat_mask.repeat(1, 4, 1, 1)
             else:
                 gat_mask = gat_mask.repeat(1, 2, 1, 1)
-            if self.mask_method < 5:
+            if self.mask_method < 5 or self.mask_method == 8:
                 spa_mask = spa_mask.repeat(1, 2, 1, 1)
             elif self.mask_method < 7:
                 spa_mask = spa_mask.repeat(1, 4, 1, 1)
+            elif self.mask_method == 7:
+                pass
             else:
                 raise NotImplementedError()
             gat_mask = torch.cat([gat_mask, spa_mask], dim=1)

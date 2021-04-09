@@ -305,7 +305,7 @@ def evaluate(args, model, tokenizer, prefix="", write_pred=True):
                                    end_logits=to_list(outputs[1][i]))
             elif args.loss_method == 'multi-hierarchy':
                 result = RawTagResult(unique_id=unique_id,
-                                      tag_logits={'logits': to_list(to_list(outputs[0][i])),
+                                      tag_logits={'logits': to_list(outputs[0][i]),
                                                   'children': [np.where(np.array(t))[0].tolist()
                                                                for t in to_list(batch[-2][i])]})
             else:
@@ -361,8 +361,6 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
     cached_features_file = '{}_{}'.format(base_cached_features_file,
                                           args.loss_method if 'soft' not in args.loss_method
                                           else '{}_{}'.format(args.soft_remain, args.soft_decay))
-    # if args.mask_method != 0:
-    #     cached_features_file += '_spatial'
 
     if os.path.exists(cached_features_file) and not args.overwrite_cache and not args.enforce:
         logger.info("Loading features from cached file %s", cached_features_file)
@@ -460,7 +458,7 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
                                separate=args.separate_mask)
     else:
         all_answer_tid = torch.tensor([f.answer_tid for f in features],
-                                      dtype=torch.long if 'hard' in args.loss_method else torch.float)
+                                      dtype=torch.long if 'base' in args.loss_method else torch.float)
         dataset = StrucDataset(all_input_ids, all_input_mask, all_segment_ids, all_answer_tid, all_tag_depth,
                                gat_mask=(all_app_tags, all_example_index, all_html_trees), base_index=all_base_index,
                                tag2tok=all_tag_to_token, shape=(args.max_tag_length, args.max_seq_length),
