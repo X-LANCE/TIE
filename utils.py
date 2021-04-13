@@ -1189,6 +1189,10 @@ def form_spatial_mask(app, rel, method=1):
                      6-two direction, symmetric;
                      7-four direction, 3 + 3r
                      8-two direction, 5 + 5r
+                     9-two direction, 5 + self loop
+                     10-two direction, 6 + self loop
+                     11-two direction, 5 - DOM
+                     12-two direction, 6 - DOM
     """
     def _form_direction_mask(rel, d):
         mask = np.zeros((len(app), len(app)), dtype=np.int)
@@ -1196,6 +1200,9 @@ def form_spatial_mask(app, rel, method=1):
             reverse_mask = np.zeros((len(app), len(app)), dtype=np.int)
         else:
             reverse_mask = None
+        if method in [9, 10]:
+            for i in range(len(app)):
+                mask[i, i] = 1
         for k, v in rel[d].items():
             try:
                 curr = app.index(int(k))
@@ -1234,7 +1241,7 @@ def form_spatial_mask(app, rel, method=1):
             u[rd == 1] = 1
             d[ru == 1] = 1
         return np.stack([r, l, u, d])
-    elif method < 7 or method == 8:
+    elif method < 13:
         h, rh = _form_direction_mask(rel, 'h')
         v, rv = _form_direction_mask(rel, 'v')
         if method == 8:
