@@ -1132,7 +1132,7 @@ def _compute_softmax(scores):
     return probs
 
 
-def form_tree_mask(app, tree, separate=False):
+def form_tree_mask(app, tree, separate=False, accelerate=True):
     def _unit(node):
         for ch in node.contents:
             if type(ch) != bs4.element.Tag:
@@ -1143,13 +1143,22 @@ def form_tree_mask(app, tree, separate=False):
             curr = app.index(curr)
             if len(path) > 0:
                 children[path[-1], curr] = 1
-            for par in path:
-                if separate:
-                    adj_up[curr, par] = 1
-                    adj_down[par, curr] = 1
-                else:
-                    adj[par, curr] = 1
-                    adj[curr, par] = 1
+            if accelerate:
+                for par in path:
+                    if separate:
+                        adj_up[curr, par] = 1
+                        adj_down[par, curr] = 1
+                    else:
+                        adj[par, curr] = 1
+                        adj[curr, par] = 1
+            else:
+                if len(path) > 0:
+                    if separate:
+                        adj_up[curr, path[-1]] = 1
+                        adj_down[path[-1], curr] = 1
+                    else:
+                        adj[path[-1], curr] = 1
+                        adj[curr, path[-1]] = 1
             path.append(curr)
             _unit(ch)
             path.pop()
@@ -1176,33 +1185,11 @@ def form_tree_mask(app, tree, separate=False):
         return adj, children
 
 
-def form_spatial_mask(app, rel, method=1):
-    r"""
-    Arguments:
-        app
-        rel
-        method(int): 1-four direction, no contain link, no symmetric;
-                     2-four direction, no contain link, symmetric;
-                     3-four direction, contain link, no symmetric;
-                     4-four direction, contain link, symmetric;
-                     5-two direction, no symmetric;
-                     6-two direction, symmetric;
-                     7-four direction, 3 + 3r
-                     8-two direction, 5 + 5r
-                     9-two direction, 5 + self loop
-                     10-two direction, 6 + self loop
-                     11-two direction, 5 - DOM
-                     12-two direction, 6 - DOM
-    """
+def form_spatial_mask(app, rel):
     def _form_direction_mask(rel, d):
         mask = np.zeros((len(app), len(app)), dtype=np.int)
-        if method % 2 == 0:
-            reverse_mask = np.zeros((len(app), len(app)), dtype=np.int)
-        else:
-            reverse_mask = None
-        if method in [9, 10]:
-            for i in range(len(app)):
-                mask[i, i] = 1
+        ind = np.diag_indices_from(mask)
+        mask[ind] = 1
         for k, v in rel[d].items():
             try:
                 curr = app.index(int(k))
@@ -1214,41 +1201,9 @@ def form_spatial_mask(app, rel, method=1):
                 except ValueError:
                     continue
                 mask[curr, ter] = 1
-                if method % 2 == 0 or method == 7:
-                    reverse_mask[ter, curr] = 1
-        return mask, reverse_mask
-    if method < 3:
-        r, rr = _form_direction_mask(rel, 'r')
-        l, rl = _form_direction_mask(rel, 'l')
-        u, ru = _form_direction_mask(rel, 'u')
-        d, rd = _form_direction_mask(rel, 'd')
-        if method % 2 == 0:
-            l[rr == 1] = 1
-            r[rl == 1] = 1
-            u[rd == 1] = 1
-            d[ru == 1] = 1
-        return np.stack([r, l, u, d])
-    elif method < 5 or method == 7:
-        r, rr = _form_direction_mask(rel, 'rw')
-        l, rl = _form_direction_mask(rel, 'lw')
-        u, ru = _form_direction_mask(rel, 'uw')
-        d, rd = _form_direction_mask(rel, 'dw')
-        if method == 7:
-            return np.stack([r, rl, l, rr, u, rd, d, ru])
-        if method % 2 == 0:
-            l[rr == 1] = 1
-            r[rl == 1] = 1
-            u[rd == 1] = 1
-            d[ru == 1] = 1
-        return np.stack([r, l, u, d])
-    elif method < 13:
-        h, rh = _form_direction_mask(rel, 'h')
-        v, rv = _form_direction_mask(rel, 'v')
-        if method == 8:
-            return np.stack([h, rh, v, rv])
-        if method % 2 == 0:
-            h[rh == 1] = 1
-            v[rv == 1] = 1
-        return np.stack([h, v])
-    else:
-        raise NotImplementedError()
+        return mask
+    r = _form_direction_mask(rel, 'rw')
+    l = _form_direction_mask(rel, 'lw')
+    u = _form_direction_mask(rel, 'uw')
+    d = _form_direction_mask(rel, 'dw')
+    return np.stack([r, l, u, d])

@@ -179,7 +179,7 @@ def train(args, train_dataset, model, tokenizer):
                       'tag_depth'      : batch[6],
                       'gat_mask'       : batch[-3],
                       'tag_to_tok'     : batch[-1]}
-            if args.mask_method != 0:
+            if args.mask_method < 2:
                 inputs.update({'spa_mask' : batch[-4]})
             outputs = model(**inputs)
             # LOCAL
@@ -600,7 +600,8 @@ def main():
     parser.add_argument('--provided_tag_pred', type=str, default=None)
     parser.add_argument('--stop_margin', type=float, default=0.5)
     parser.add_argument('--n_best_tag_size', type=int, default=1)
-    parser.add_argument('--mask_method', type=int, default=1)
+    parser.add_argument('--mask_method', type=int, default=1,
+                        help='how the GAT implement: 0-DOM+SPA; 1-SPA; 2-DOM; 3-DOM-')
     args = parser.parse_args()
 
     if os.path.exists(args.output_dir) and os.listdir(

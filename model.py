@@ -105,22 +105,19 @@ class StrucDataset(Dataset):
         html_tree = self.gat_mask[2][example_index]
         base = self.base_index[index]
 
-        if self.spatial_mask is not None:
-            if self.mask_method < 5 or self.mask_method == 8:
-                spa_mask = torch.zeros((4, self.shape[0], self.shape[0]), dtype=torch.long)
-            elif self.mask_method == 7:
-                spa_mask = torch.zeros((8, self.shape[0], self.shape[0]), dtype=torch.long)
-            elif self.mask_method < 13:
-                spa_mask = torch.zeros((2, self.shape[0], self.shape[0]), dtype=torch.long)
-            else:
-                raise NotImplementedError()
-            temp = form_spatial_mask(app_tags, self.spatial_mask[self.page_id[index]], self.mask_method)
+        if self.spatial_mask is not None and self.mask_method < 2:
+            spa_mask = torch.zeros((4, self.shape[0], self.shape[0]), dtype=torch.long)
+            spa_mask[:, :base, :base + len(app_tags) + 1] = 1
+            spa_mask[:, base + len(app_tags), :base + len(app_tags) + 1] = 1
+            temp = form_spatial_mask(app_tags, self.spatial_mask[self.page_id[index]])
             spa_mask[:, base:base + len(app_tags), base:base + len(app_tags)] = torch.tensor(temp)
             output.append(spa_mask)
 
         gat_mask = torch.zeros((1, self.shape[0], self.shape[0]), dtype=torch.long)
-        gat_mask[:, :len(tag_to_token_index)] = 1
-        temp = torch.tensor(form_tree_mask(app_tags, html_tree, separate=self.separate))
+        gat_mask[:, :base, :base + len(app_tags) + 1] = 1
+        gat_mask[:, base + len(app_tags), :base + len(app_tags) + 1] = 1
+        temp = torch.tensor(form_tree_mask(app_tags, html_tree, separate=self.separate,
+                                           accelerate=self.mask_method != 3))
         if self.separate:  # TODO multiple mask and variable total head number implementation
             gat_mask = gat_mask.repeat(2, 1, 1)
             gat_mask[:, base:base + len(app_tags), base:base + len(app_tags)] = torch.tensor(temp[0:2])
@@ -269,23 +266,15 @@ class GraphHtmlBert(BertPreTrainedModel):
         outputs = outputs[2:]
 
         gat_inputs = self.link(sequence_output, tag_to_tok, tag_depth)
-        if self.mask_method != 0:
-            if self.mask_method < 5 or self.mask_method == 8:
-                spa_mask = spa_mask.repeat(1, 2, 1, 1)
-            elif self.mask_method < 11:
-                spa_mask = spa_mask.repeat(1, 4, 1, 1)
-            elif self.mask_method < 13:
-                pass
+        if self.mask_method == 0:
+            spa_mask = spa_mask.repeat(1, 2, 1, 1)
+            if gat_mask.size(1) == 1:
+                gat_mask = gat_mask.repeat(1, 4, 1, 1)
             else:
-                raise NotImplementedError()
-            if self.mask_method < 11:
-                if gat_mask.size(1) == 1:
-                    gat_mask = gat_mask.repeat(1, 4, 1, 1)
-                else:
-                    gat_mask = gat_mask.repeat(1, 2, 1, 1)
-                gat_mask = torch.cat([gat_mask, spa_mask], dim=1)
-            else:
-                gat_mask = spa_mask.repeat(1, 6, 1, 1)
+                gat_mask = gat_mask.repeat(1, 2, 1, 1)
+            gat_mask = torch.cat([gat_mask, spa_mask], dim=1)
+        elif self.mask_method == 1:
+            gat_mask = spa_mask.repeat(1, 3, 1, 1)
         elif gat_mask.size(1) != 1:
             gat_mask = gat_mask.repeat(1, 6, 1, 1)
         if head_mask is None:
