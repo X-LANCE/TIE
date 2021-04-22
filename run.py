@@ -289,9 +289,8 @@ def evaluate(args, model, tokenizer, prefix="", write_pred=True):
                           'token_type_ids' : batch[2],
                           'tag_depth'      : batch[4],
                           'gat_mask'       : batch[-3],
-                          'spa_mask'       : batch[-4],
                           'tag_to_tok'     : batch[-1]}
-                if args.mask_method != 0:
+                if args.mask_method < 2:
                     inputs.update({'spa_mask' : batch[-4]})
             feature_indices = batch[3]
             outputs = model(**inputs)
@@ -454,7 +453,7 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
                                gat_mask=(all_app_tags, all_example_index, all_html_trees), base_index=all_base_index,
                                tag2tok=all_tag_to_token, shape=(args.max_tag_length, args.max_seq_length),
                                training=False, page_id=all_page_id, mask_method=args.mask_method,
-                               mask_dir=os.path.dirname(input_file) if args.mask_method != 0 else None,
+                               mask_dir=os.path.dirname(input_file) if args.mask_method < 2 else None,
                                separate=args.separate_mask)
     else:
         all_answer_tid = torch.tensor([f.answer_tid for f in features],
@@ -463,7 +462,7 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
                                gat_mask=(all_app_tags, all_example_index, all_html_trees), base_index=all_base_index,
                                tag2tok=all_tag_to_token, shape=(args.max_tag_length, args.max_seq_length),
                                training=True, page_id=all_page_id, mask_method=args.mask_method,
-                               mask_dir=os.path.dirname(input_file) if args.mask_method != 0 else None,
+                               mask_dir=os.path.dirname(input_file) if args.mask_method < 2 else None,
                                separate=args.separate_mask)
 
     if evaluate:

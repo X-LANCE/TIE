@@ -266,17 +266,32 @@ class GraphHtmlBert(BertPreTrainedModel):
         outputs = outputs[2:]
 
         gat_inputs = self.link(sequence_output, tag_to_tok, tag_depth)
-        if self.mask_method == 0:
-            spa_mask = spa_mask.repeat(1, 2, 1, 1)
-            if gat_mask.size(1) == 1:
-                gat_mask = gat_mask.repeat(1, 4, 1, 1)
-            else:
-                gat_mask = gat_mask.repeat(1, 2, 1, 1)
-            gat_mask = torch.cat([gat_mask, spa_mask], dim=1)
-        elif self.mask_method == 1:
-            gat_mask = spa_mask.repeat(1, 3, 1, 1)
-        elif gat_mask.size(1) != 1:
-            gat_mask = gat_mask.repeat(1, 6, 1, 1)
+        if self.base_type == 'bert':
+            if self.mask_method == 0:
+                spa_mask = spa_mask.repeat(1, 2, 1, 1)
+                if gat_mask.size(1) == 1:
+                    gat_mask = gat_mask.repeat(1, 4, 1, 1)
+                else:
+                    gat_mask = gat_mask.repeat(1, 2, 1, 1)
+                gat_mask = torch.cat([gat_mask, spa_mask], dim=1)
+            elif self.mask_method == 1:
+                gat_mask = spa_mask.repeat(1, 3, 1, 1)
+            elif gat_mask.size(1) != 1:
+                gat_mask = gat_mask.repeat(1, 6, 1, 1)
+        elif self.base_type == 'electra':
+            if self.mask_method == 0:
+                spa_mask = spa_mask.repeat(1, 3, 1, 1)
+                if gat_mask.size(1) == 1:
+                    gat_mask = gat_mask.repeat(1, 4, 1, 1)
+                else:
+                    gat_mask = gat_mask.repeat(1, 2, 1, 1)
+                gat_mask = torch.cat([gat_mask, spa_mask], dim=1)
+            elif self.mask_method == 1:
+                gat_mask = spa_mask.repeat(1, 4, 1, 1)
+            elif gat_mask.size(1) != 1:
+                gat_mask = gat_mask.repeat(1, 8, 1, 1)
+        else:
+            raise NotImplementedError()
         if head_mask is None:
             head_mask = [None] * self.num_gat_layers
         extended_gat_mask = convert_mask_to_reality(gat_mask)
