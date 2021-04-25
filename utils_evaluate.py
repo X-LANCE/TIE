@@ -11,7 +11,6 @@ import collections
 import json
 from copy import deepcopy
 
-import numpy as np
 import os
 import re
 import string
@@ -21,13 +20,12 @@ from bs4 import BeautifulSoup
 
 class EVAL_OPTS:
     def __init__(self, data_file, pred_file, tag_pred_file, result_file='',
-                 out_file="",  out_image_dir=None, verbose=False):
+                 out_file="",  verbose=False):
         self.data_file = data_file
         self.pred_file = pred_file
         self.tag_pred_file = tag_pred_file
         self.result_file = result_file
         self.out_file = out_file
-        self.out_image_dir = out_image_dir
         self.verbose = verbose
 
 
@@ -39,12 +37,6 @@ def parse_args():
     parser.add_argument('--result-file', '-r', metavar='qas_eval.json')
     parser.add_argument('--out-file', '-o', metavar='eval.json',
                         help='Write accuracy metrics to file (default is stdout).')
-    parser.add_argument('--na-prob-file', '-n', metavar='na_prob.json',
-                        help='Model estimates of probability of no answer.')
-    parser.add_argument('--na-prob-thresh', '-t', type=float, default=1.0,
-                        help='Predict "" if no-answer probability exceeds this (default = 1.0).')
-    parser.add_argument('--out-image-dir', '-p', metavar='out_images', default=None,
-                        help='Save precision-recall curves to directory.')
     parser.add_argument('--verbose', '-v', action='store_true')
     if len(sys.argv) == 1:
         parser.print_help()
@@ -244,83 +236,6 @@ def merge_eval(main_eval, new_eval, prefix):
         main_eval['%s_%s' % (prefix, k)] = new_eval[k]
 
 
-def find_best_thresh(preds, scores, na_probs, qid_to_has_ans):
-    num_no_ans = sum(1 for k in qid_to_has_ans if not qid_to_has_ans[k])
-    cur_score = num_no_ans
-    best_score = cur_score
-    best_thresh = 0.0
-    qid_list = sorted(na_probs, key=lambda k: na_probs[k])
-    for i, qid in enumerate(qid_list):
-        if qid not in scores:
-            continue
-        if qid_to_has_ans[qid]:
-            diff = scores[qid]
-        else:
-            if preds[qid]:
-                diff = -1
-            else:
-                diff = 0
-        cur_score += diff
-        if cur_score > best_score:
-            best_score = cur_score
-            best_thresh = na_probs[qid]
-    return 100.0 * best_score / len(scores), best_thresh
-
-
-def find_best_thresh_v2(preds, scores, na_probs, qid_to_has_ans):
-    num_no_ans = sum(1 for k in qid_to_has_ans if not qid_to_has_ans[k])
-    cur_score = num_no_ans
-    best_score = cur_score
-    best_thresh = 0.0
-    qid_list = sorted(na_probs, key=lambda k: na_probs[k])
-    for i, qid in enumerate(qid_list):
-        if qid not in scores:
-            continue
-        if qid_to_has_ans[qid]:
-            diff = scores[qid]
-        else:
-            if preds[qid]:
-                diff = -1
-            else:
-                diff = 0
-        cur_score += diff
-        if cur_score > best_score:
-            best_score = cur_score
-            best_thresh = na_probs[qid]
-
-    has_ans_score, has_ans_cnt = 0, 0
-    for qid in qid_list:
-        if not qid_to_has_ans[qid]:
-            continue
-        has_ans_cnt += 1
-
-        if qid not in scores:
-            continue
-        has_ans_score += scores[qid]
-
-    return 100.0 * best_score / len(scores), best_thresh, 1.0 * has_ans_score / has_ans_cnt
-
-
-def find_all_best_thresh(main_eval, preds, exact_raw, f1_raw, na_probs, qid_to_has_ans):
-    best_exact, exact_thresh = find_best_thresh(preds, exact_raw, na_probs, qid_to_has_ans)
-    best_f1, f1_thresh = find_best_thresh(preds, f1_raw, na_probs, qid_to_has_ans)
-    main_eval['best_exact'] = best_exact
-    main_eval['best_exact_thresh'] = exact_thresh
-    main_eval['best_f1'] = best_f1
-    main_eval['best_f1_thresh'] = f1_thresh
-
-
-def find_all_best_thresh_v2(main_eval, preds, exact_raw, f1_raw, na_probs, qid_to_has_ans):
-    best_exact, exact_thresh, has_ans_exact = find_best_thresh_v2(preds, exact_raw, na_probs, qid_to_has_ans)
-    best_f1, f1_thresh, has_ans_f1 = find_best_thresh_v2(preds, f1_raw, na_probs, qid_to_has_ans)
-    main_eval['best_exact'] = best_exact
-    main_eval['best_exact_thresh'] = exact_thresh
-    main_eval['best_f1'] = best_f1
-    main_eval['best_f1_thresh'] = f1_thresh
-    main_eval['has_ans_exact'] = has_ans_exact
-    main_eval['has_ans_f1'] = has_ans_f1
-
-
 def main(OPTS):
     data_dir = os.path.dirname(OPTS.data_file)
     with open(OPTS.data_file) as f:
@@ -367,9 +282,4 @@ def main(OPTS):
 
 if __name__ == '__main__':
     OPTS = parse_args()
-    if OPTS.out_image_dir:
-        import matplotlib
-
-        matplotlib.use('Agg')
-        import matplotlib.pyplot as plt
     main(OPTS)
