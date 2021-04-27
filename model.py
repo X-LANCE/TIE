@@ -173,6 +173,7 @@ class GraphHtmlConfig(PretrainedConfig):
         self.num_hidden_layers = args.num_node_block
         self.max_depth_embeddings = args.max_depth_embeddings
         self.mask_method = args.mask_method
+        self.no_ce = args.no_ce
 
 
 class Link(nn.Module):
@@ -228,6 +229,7 @@ class GraphHtmlBert(BertPreTrainedModel):
         self.base_type = config.model_type
         self.loss_method = config.loss_method
         self.mask_method = config.mask_method
+        self.no_ce = config.no_ce
         if config.model_type == 'bert':
             self.ptm = PTMForQA.bert
         elif config.model_type == 'electra':
@@ -254,16 +256,23 @@ class GraphHtmlBert(BertPreTrainedModel):
             tag_depth=None,
     ):
 
-        outputs = self.ptm(
-            input_ids,
-            attention_mask=attention_mask,
-            token_type_ids=token_type_ids,
-            position_ids=position_ids,
-            head_mask=head_mask,
-            inputs_embeds=inputs_embeds,
-        )
-        sequence_output = outputs[0]
-        outputs = outputs[2:]
+        if self.no_ce:
+            sequence_output = self.embeddings(
+                input_ids=input_ids, position_ids=position_ids, token_type_ids=token_type_ids,
+                inputs_embeds=inputs_embeds
+            )
+            outputs = ()
+        else:
+            outputs = self.ptm(
+                input_ids,
+                attention_mask=attention_mask,
+                token_type_ids=token_type_ids,
+                position_ids=position_ids,
+                head_mask=head_mask,
+                inputs_embeds=inputs_embeds,
+            )
+            sequence_output = outputs[0]
+            outputs = outputs[2:]
 
         gat_inputs = self.link(sequence_output, tag_to_tok, tag_depth)
         if self.base_type == 'bert':

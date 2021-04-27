@@ -601,6 +601,8 @@ def main():
     parser.add_argument('--n_best_tag_size', type=int, default=1)
     parser.add_argument('--mask_method', type=int, default=1,
                         help='how the GAT implement: 0-DOM+SPA; 1-SPA; 2-DOM; 3-DOM-')
+
+    parser.add_argument('--no_ce', action='store_true')
     args = parser.parse_args()
 
     if os.path.exists(args.output_dir) and os.listdir(

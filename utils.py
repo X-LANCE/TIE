@@ -1188,6 +1188,7 @@ def form_tree_mask(app, tree, separate=False, accelerate=True):
 def form_spatial_mask(app, rel):
     def _form_direction_mask(rel, d):
         mask = np.zeros((len(app), len(app)), dtype=np.int)
+        reverse_mask = np.zeros((len(app), len(app)), dtype=np.int)
         ind = np.diag_indices_from(mask)
         mask[ind] = 1
         for k, v in rel[d].items():
@@ -1201,9 +1202,14 @@ def form_spatial_mask(app, rel):
                 except ValueError:
                     continue
                 mask[curr, ter] = 1
-        return mask
-    r = _form_direction_mask(rel, 'rw')
-    l = _form_direction_mask(rel, 'lw')
-    u = _form_direction_mask(rel, 'uw')
-    d = _form_direction_mask(rel, 'dw')
+                reverse_mask[ter, curr] = 1
+        return mask, reverse_mask
+    r, rr = _form_direction_mask(rel, 'rw')
+    l, rl = _form_direction_mask(rel, 'lw')
+    u, ru = _form_direction_mask(rel, 'uw')
+    d, rd = _form_direction_mask(rel, 'dw')
+    l[rr == 1] = 1
+    r[rl == 1] = 1
+    u[rd == 1] = 1
+    d[ru == 1] = 1
     return np.stack([r, l, u, d])
