@@ -35,12 +35,12 @@ from transformers import (
     AdamW,
     AutoConfig,
     AutoModelForQuestionAnswering,
-    AutoTokenizer, BertTokenizer, ElectraTokenizer,
+    AutoTokenizer, BertTokenizer, ElectraTokenizer, RobertaTokenizer,
     get_linear_schedule_with_warmup,
 )
 
 
-from model import GraphHtmlConfig, GraphHtmlBert, StrucDataset, SubDataset
+from model import GraphHtmlConfig, GraphHtmlBert, StrucDataset, SubDataset, VConfig, VPLM
 from utils import read_squad_examples, convert_examples_to_features, RawResult, RawTagResult,\
     write_tag_predictions, write_predictions_provided_tag
 
@@ -88,41 +88,11 @@ def train(args, train_dataset, model, tokenizer):
 
     # Prepare optimizer and schedule (linear warmup and decay)
     no_decay = ['bias', 'LayerNorm.weight']
-    if args.separate_lr:
-        optimizer_grouped_parameters_ptm = [
-            {'params': [p for n, p in model.named_parameters() if n.startswith('ptm') and
-                        not any(nd in n for nd in no_decay)],
-             'weight_decay': args.weight_decay},
-            {'params': [p for n, p in model.named_parameters() if n.startswith('ptm') and
-                        any(nd in n for nd in no_decay)],
-             'weight_decay': 0.0}
-        ]
-        optimizer_grouped_parameters = [
-            {'params': [p for n, p in model.named_parameters() if not n.startswith('ptm') and
-                        not any(nd in n for nd in no_decay)],
-             'weight_decay': args.weight_decay},
-            {'params': [p for n, p in model.named_parameters() if not n.startswith('ptm') and
-                        any(nd in n for nd in no_decay) and 'ptm' not in n],
-             'weight_decay': 0.0}
-        ]
-        optimizer_ptm = AdamW(optimizer_grouped_parameters_ptm, lr=args.learning_rate / 10, eps=args.adam_epsilon)
-        scheduler_ptm = get_linear_schedule_with_warmup(optimizer_ptm, num_warmup_steps=args.warmup_steps,
-                                                        num_training_steps=t_total)
-    elif args.separate_train:
-        optimizer_grouped_parameters = [
-            {'params': [p for n, p in model.named_parameters() if not n.startswith('ptm') and
-                        not any(nd in n for nd in no_decay)],
-             'weight_decay': args.weight_decay},
-            {'params': [p for n, p in model.named_parameters() if not n.startswith('ptm') and
-                        any(nd in n for nd in no_decay)],
-             'weight_decay': 0.0}
-        ]
-    else:
-        optimizer_grouped_parameters = [
-            {'params': [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
-             'weight_decay': args.weight_decay},
-            {'params': [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
-        ]
+    optimizer_grouped_parameters = [
+        {'params': [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
+         'weight_decay': args.weight_decay},
+        {'params': [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
+    ]
     optimizer = AdamW(optimizer_grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon)
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=args.warmup_steps,
                                                 num_training_steps=t_total)
@@ -156,35 +126,44 @@ def train(args, train_dataset, model, tokenizer):
 
     global_step = 0
     tr_loss, logging_loss = 0.0, 0.0
+
+    if args.load_epoch:
+        state_dict = torch.load(os.path.join(args.output_dir, 'resume.bin'))
+        start_epoch = state_dict['epoch'] + 1
+        global_step = state_dict['step']
+        model.load_state_dict(state_dict['model'])
+        optimizer.load_state_dict(state_dict['optimizer'])
+        scheduler.load_state_dict(state_dict['scheduler'])
+        del state_dict
+        torch.cuda.empty_cache()
+    else:
+        start_epoch = 0
+
     model.zero_grad()
-    train_iterator = trange(int(args.num_train_epochs), desc="Epoch", disable=args.local_rank not in [-1, 0])
+    train_iterator = trange(start_epoch, int(args.num_train_epochs), desc="Epoch",
+                            disable=args.local_rank not in [-1, 0])
     set_seed(args)  # Added here for reproductibility (even between python 2 and 3)
-    for _ in train_iterator:
+    for epoch in train_iterator:
         epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
-        # LOCAL
-        batch_start_time = timeit.default_timer()
-        ft, ct = [], []
 
         for step, batch in enumerate(epoch_iterator):
             model.train()
             batch = tuple(t.to(args.device) for t in batch)
-            # LOCAL
-            ft.append(timeit.default_timer() - batch_start_time)
-            current_time = timeit.default_timer()
 
             inputs = {'input_ids'      : batch[0],
                       'attention_mask' : batch[1],
                       'token_type_ids' : batch[2],
                       'answer_tid'     : batch[3],
-                      'tag_depth'      : batch[6],
+                      'tag_depth'      : batch[4],
                       'gat_mask'       : batch[-3],
                       'tag_to_tok'     : batch[-1]}
             if args.mask_method < 2:
                 inputs.update({'spa_mask' : batch[-4]})
+                if args.cnn_feature_dir is not None:
+                    inputs.update({'visual_feature': batch[-5]})
+            if args.model_type == 'roberta':
+                del inputs['token_type_ids']
             outputs = model(**inputs)
-            # LOCAL
-            ct.append(timeit.default_timer() - current_time)
-
             loss = outputs[0]
 
             if args.n_gpu > 1:
@@ -207,9 +186,6 @@ def train(args, train_dataset, model, tokenizer):
 
                 optimizer.step()
                 scheduler.step()  # Update learning rate schedule
-                if args.separate_lr:
-                    optimizer_ptm.step()
-                    scheduler_ptm.step()
                 model.zero_grad()
                 global_step += 1
 
@@ -238,11 +214,13 @@ def train(args, train_dataset, model, tokenizer):
             if 0 < args.max_steps < global_step:
                 epoch_iterator.close()
                 break
-            # LOCAL
-            batch_start_time = timeit.default_timer()
 
-        # LOCAL
-        print('Fetch Time: {}\nCompute Time: {}'.format(str(sum(ft) / len(ft)), str(sum(ct) / len(ct))))
+        state_dict = {'epoch': epoch,
+                      'step': global_step,
+                      'model': model.state_dict(),
+                      'optimizer': optimizer.state_dict(),
+                      'scheduler': scheduler.state_dict()}
+        torch.save(state_dict, os.path.join(args.output_dir, 'resume.bin'))
 
         if 0 < args.max_steps < global_step:
             train_iterator.close()
@@ -283,6 +261,8 @@ def evaluate(args, model, tokenizer, prefix="", write_pred=True):
                 inputs = {'input_ids': batch[0],
                           'attention_mask': batch[1],
                           'token_type_ids': batch[2]}
+                if args.cnn_feature_dir is not None:
+                    inputs.update({'visual_feature': batch[-5]})
             else:
                 inputs = {'input_ids'      : batch[0],
                           'attention_mask' : batch[1],
@@ -291,7 +271,11 @@ def evaluate(args, model, tokenizer, prefix="", write_pred=True):
                           'gat_mask'       : batch[-3],
                           'tag_to_tok'     : batch[-1]}
                 if args.mask_method < 2:
-                    inputs.update({'spa_mask' : batch[-4]})
+                    inputs.update({'spa_mask': batch[-4]})
+                    if args.cnn_feature_dir is not None:
+                        inputs.update({'visual_feature': batch[-5]})
+            if args.model_type == 'roberta':
+                del inputs['token_type_ids']
             feature_indices = batch[3]
             outputs = model(**inputs)
 
@@ -302,11 +286,6 @@ def evaluate(args, model, tokenizer, prefix="", write_pred=True):
                 result = RawResult(unique_id=unique_id,
                                    start_logits=to_list(outputs[0][i]),
                                    end_logits=to_list(outputs[1][i]))
-            elif args.loss_method == 'multi-hierarchy':
-                result = RawTagResult(unique_id=unique_id,
-                                      tag_logits={'logits': to_list(outputs[0][i]),
-                                                  'children': [np.where(np.array(t))[0].tolist()
-                                                               for t in to_list(batch[-2][i])]})
             else:
                 result = RawTagResult(unique_id=unique_id,
                                       tag_logits=to_list(outputs[0][i]))
@@ -329,8 +308,8 @@ def evaluate(args, model, tokenizer, prefix="", write_pred=True):
                                                  args.verbose_logging, write_pred=write_pred)
     else:
         # TODO n best tag size greater than 1
-        returns = write_tag_predictions(args.loss_method, examples, features, all_results, 1, args.stop_margin,
-                                        output_tag_prediction_file, output_nbest_file, write_pred=write_pred)
+        returns = write_tag_predictions(examples, features, all_results, 1, output_tag_prediction_file,
+                                        output_nbest_file, write_pred=write_pred)
         output_prediction_file = None
 
     if not write_pred:
@@ -360,6 +339,7 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
     cached_features_file = '{}_{}'.format(base_cached_features_file,
                                           args.loss_method if 'soft' not in args.loss_method
                                           else '{}_{}'.format(args.soft_remain, args.soft_decay))
+    cached_features_file += 'V'
 
     if os.path.exists(cached_features_file) and not args.overwrite_cache and not args.enforce:
         logger.info("Loading features from cached file %s", cached_features_file)
@@ -429,8 +409,7 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
         raise SystemError('Mission complete!')
 
     if args.separate_read and not evaluate:
-        dataset = SubDataset(examples, evaluate, total, cached_features_file, 2,
-                             (args.max_tag_length, args.max_seq_length), args.loss_method, args.separate_mask)
+        dataset = SubDataset(examples, evaluate, total, cached_features_file, 2, args)
         if evaluate:
             dataset = (dataset, examples, features)
         return dataset
@@ -441,6 +420,7 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
     all_segment_ids = torch.tensor([f.segment_ids for f in features], dtype=torch.long)
     all_tag_depth = torch.tensor([f.depth for f in features], dtype=torch.long)
     all_app_tags = [f.app_tags for f in features]
+    all_tag_lists = torch.tensor([f.tag_list for f in features], dtype=torch.long)
     all_example_index = [f.example_index for f in features]
     all_html_trees = [e.html_tree for e in examples]
     all_base_index = [f.base_index for f in features]
@@ -450,20 +430,24 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
     if evaluate:
         all_feature_index = torch.arange(all_input_ids.size(0), dtype=torch.long)
         dataset = StrucDataset(all_input_ids, all_input_mask, all_segment_ids, all_feature_index, all_tag_depth,
+                               tag_list=all_tag_lists,
                                gat_mask=(all_app_tags, all_example_index, all_html_trees), base_index=all_base_index,
                                tag2tok=all_tag_to_token, shape=(args.max_tag_length, args.max_seq_length),
                                training=False, page_id=all_page_id, mask_method=args.mask_method,
                                mask_dir=os.path.dirname(input_file) if args.mask_method < 2 else None,
-                               separate=args.separate_mask)
+                               separate=args.separate_mask, cnn_feature_dir=args.cnn_feature_dir,
+                               direction=args.direction)
     else:
         all_answer_tid = torch.tensor([f.answer_tid for f in features],
                                       dtype=torch.long if 'base' in args.loss_method else torch.float)
         dataset = StrucDataset(all_input_ids, all_input_mask, all_segment_ids, all_answer_tid, all_tag_depth,
+                               tag_list=all_tag_lists,
                                gat_mask=(all_app_tags, all_example_index, all_html_trees), base_index=all_base_index,
                                tag2tok=all_tag_to_token, shape=(args.max_tag_length, args.max_seq_length),
                                training=True, page_id=all_page_id, mask_method=args.mask_method,
                                mask_dir=os.path.dirname(input_file) if args.mask_method < 2 else None,
-                               separate=args.separate_mask)
+                               separate=args.separate_mask, cnn_feature_dir=args.cnn_feature_dir,
+                               direction=args.direction)
 
     if evaluate:
         dataset = (dataset, examples, features)
@@ -580,8 +564,6 @@ def main():
     # Struc_Config parameters
     parser.add_argument('--num_node_block', type=int, default=3)
 
-    parser.add_argument('--separate_lr', action='store_true')
-    parser.add_argument('--separate_train', action='store_true')
     parser.add_argument('--resume', type=str, default=None,
                         help='the folder of the checkpoint is provided')
     parser.add_argument('--separate_read', action='store_true')
@@ -589,20 +571,22 @@ def main():
     parser.add_argument('--evaluate_split', type=str, default='dev', choices=['dev', 'test', 'train'])
     parser.add_argument('--max_depth_embeddings', type=int, default=None,
                         help='Set to the max depth embedding for node if want to use the position embeddings')
-    parser.add_argument('--loss_method', type=str, default='base', choices=['base', 'soft', 'multi',
-                                                                            'multi-soft', 'multi-hierarchy'])
+    parser.add_argument('--loss_method', type=str, default='base', choices=['base', 'soft', 'multi-soft'])
     parser.add_argument('--soft_remain', type=float, default=0.7)
     parser.add_argument('--soft_decay', type=float, default=0.5)
     parser.add_argument('--separate_mask', action='store_true')
     parser.add_argument('--resume_from_PLM', type=str, default=None,
                         help='the path of the folder contains the state dict file and the tokenizer')
     parser.add_argument('--provided_tag_pred', type=str, default=None)
-    parser.add_argument('--stop_margin', type=float, default=0.5)
-    parser.add_argument('--n_best_tag_size', type=int, default=1)
     parser.add_argument('--mask_method', type=int, default=1,
                         help='how the GAT implement: 0-DOM+SPA; 1-SPA; 2-DOM; 3-DOM-')
 
     parser.add_argument('--no_ce', action='store_true')
+    parser.add_argument('--cnn_feature_dim', default=0, type=int)
+    parser.add_argument('--cnn_feature_dir', default=None, type=str)
+    parser.add_argument('--cnn_mode', default="none", choices=["none", "once", "each"])
+    parser.add_argument('--direction', default='b', choices=['b', 'v', 'h'])
+    parser.add_argument('--load_epoch', action='store_true')
     args = parser.parse_args()
 
     if os.path.exists(args.output_dir) and os.listdir(
@@ -677,16 +661,18 @@ def main():
         train_dataset = load_and_cache_examples(args, tokenizer, evaluate=False, split='train')
         model.resize_token_embeddings(len(tokenizer))
         if args.resume_from_PLM is not None:
-            model.load_state_dict(torch.load(os.path.join(args.resume_from_PLM, 'pytorch_model.bin')))
+            model.load_state_dict(torch.load(os.path.join(args.resume_from_PLM, 'pytorch_model.bin')), strict=False)
             if args.model_type == 'bert':
                 tokenizer = BertTokenizer.from_pretrained(args.resume_from_PLM, do_lower_case=args.do_lower_case)
             elif args.model_type == 'electra':
                 tokenizer = ElectraTokenizer.from_pretrained(args.resume_from_PLM, do_lower_case=args.do_lower_case)
+            elif args.model_type == 'roberta':
+                tokenizer = RobertaTokenizer.from_pretrained(args.resume_from_PLM, do_lower_case=args.do_lower_case)
             else:
                 raise NotImplementedError()
         tokenizer.save_pretrained(args.output_dir)
         html_config = GraphHtmlConfig(args, **config.__dict__)
-        model = GraphHtmlBert(model, html_config)
+        model = GraphHtmlBert(model, html_config, d=args.direction)
         if args.resume is not None:
             model.load_state_dict(torch.load(args.resume), strict=False)
         model.to(args.device)
@@ -720,6 +706,8 @@ def main():
                 tokenizer = BertTokenizer.from_pretrained(args.resume_from_PLM, do_lower_case=args.do_lower_case)
             elif args.model_type == 'electra':
                 tokenizer = ElectraTokenizer.from_pretrained(args.resume_from_PLM, do_lower_case=args.do_lower_case)
+            elif args.model_type == 'roberta':
+                tokenizer = RobertaTokenizer.from_pretrained(args.resume_from_PLM, do_lower_case=args.do_lower_case)
             else:
                 raise NotImplementedError()
             bert_config = AutoConfig.from_pretrained(args.config_name if args.config_name else args.model_name_or_path,
@@ -730,6 +718,9 @@ def main():
             bert_model.resize_token_embeddings(len(tokenizer))
             if 'HPLM' in args.resume_from_PLM:
                 model = bert_model
+            elif 'VPLM' in args.resume_from_PLM:
+                v_config = VConfig('V-PLM', args.model_type, 3, 1024, **config.__dict__)
+                model = VPLM(bert_model, v_config)
             else:
                 raise NotImplementedError()
             model.load_state_dict(torch.load(os.path.join(args.resume_from_PLM, 'pytorch_model.bin')))
@@ -749,6 +740,8 @@ def main():
                 tokenizer = BertTokenizer.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case)
             elif args.model_type == 'electra':
                 tokenizer = ElectraTokenizer.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case)
+            elif args.model_type == 'roberta':
+                tokenizer = RobertaTokenizer.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case)
             else:
                 raise NotImplementedError()
 
@@ -771,7 +764,7 @@ def main():
                 if global_step and args.eval_to_checkpoint and int(global_step) >= args.eval_to_checkpoint:
                     continue
                 html_config = GraphHtmlConfig(args, **config.__dict__)
-                model = GraphHtmlBert(bert_model, html_config)
+                model = GraphHtmlBert(bert_model, html_config, d=args.direction)
                 model.load_state_dict(torch.load(os.path.join(checkpoint, 'pytorch_model.bin')))  # confirmed correct
                 model.to(args.device)
 

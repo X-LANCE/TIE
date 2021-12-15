@@ -107,6 +107,7 @@ class InputFeatures(object):
                  token_to_tag_index=None,
                  tag_to_token_index=None,
                  app_tags=None,
+                 tag_list=None,
                  depth=None,
                  base_index=None,
                  is_impossible=None):
@@ -127,6 +128,7 @@ class InputFeatures(object):
         self.token_to_tag_index = token_to_tag_index
         self.tag_to_token_index = tag_to_token_index
         self.app_tags = app_tags
+        self.tag_list = tag_list
         self.depth = depth
         self.base_index = base_index
         self.is_impossible = is_impossible
@@ -423,12 +425,7 @@ def convert_examples_to_features(examples, tokenizer, loss_method, max_seq_lengt
                 if temp != 0:
                     marker[origin_answer_tid] = temp * soft_remain / (1 - soft_remain)
                     marker /= marker.sum()
-        if loss_method in ['multi', 'multi-hierarchy']:
-            marker[marker > 0] = 1
-            marker = marker.astype(np.float)
-            answer_tid = marker.tolist()
-        else:
-            answer_tid = marker.tolist()
+        answer_tid = marker.tolist()
         return answer_tid
 
     unique_id = 1000000000
@@ -484,6 +481,7 @@ def convert_examples_to_features(examples, tokenizer, loss_method, max_seq_lengt
             tag_to_token_index = []
             token_to_tag_index = []
             depth = []
+            tag_list = []
 
             # CLS
             tokens.append(cls_token)
@@ -491,11 +489,13 @@ def convert_examples_to_features(examples, tokenizer, loss_method, max_seq_lengt
             tag_to_token_index.append([0, 0])
             token_to_tag_index.append(-1)
             depth.append(0)
+            tag_list.append(-1)
 
             # Query
             for i in range(len(query_tokens)):
                 tag_to_token_index.append([len(tokens) + i, len(tokens) + i])
                 token_to_tag_index.append(-1)
+                tag_list.append(-1)
             tokens += query_tokens
             segment_ids += [sequence_a_segment_id] * len(query_tokens)
             depth += [0] * len(query_tokens)
@@ -506,6 +506,7 @@ def convert_examples_to_features(examples, tokenizer, loss_method, max_seq_lengt
             tag_to_token_index.append([len(tokens) - 1, len(tokens) - 1])
             token_to_tag_index.append(-1)
             depth.append(0)
+            tag_list.append(-1)
 
             # Paragraph
             app_tags = []
@@ -526,6 +527,7 @@ def convert_examples_to_features(examples, tokenizer, loss_method, max_seq_lengt
                     end = min(end, doc_span.start + doc_span.length - 1) - doc_span.start + len(tokens)
                     tag_to_token_index.append([start, end])
                     app_tags.append(i)
+                    tag_list.append(i)
             for ind in app_tags:
                 depth.append(example.tag_depth[ind])
             # if len(app_tags) > max_tag_length - 4:
@@ -548,6 +550,7 @@ def convert_examples_to_features(examples, tokenizer, loss_method, max_seq_lengt
             tag_to_token_index.append([len(tokens) - 1, len(tokens) - 1])
             token_to_tag_index.append(-1)
             depth.append(0)
+            tag_list.append(-1)
 
             input_ids = tokenizer.convert_tokens_to_ids(tokens)
 
@@ -563,12 +566,14 @@ def convert_examples_to_features(examples, tokenizer, loss_method, max_seq_lengt
                 token_to_tag_index.append(-1)
             while len(depth) < max_tag_length:
                 depth.append(0)
+                tag_list.append(-1)
 
             assert len(input_ids) == max_seq_length
             assert len(input_mask) == max_seq_length
             assert len(segment_ids) == max_seq_length
             assert len(token_to_tag_index) == max_seq_length
             assert len(depth) == max_tag_length
+            assert len(tag_list) == max_tag_length
 
             span_is_impossible = False
             answer_tid = None
@@ -611,6 +616,7 @@ def convert_examples_to_features(examples, tokenizer, loss_method, max_seq_lengt
                     token_to_tag_index=token_to_tag_index,
                     tag_to_token_index=tag_to_token_index,
                     app_tags=app_tags,
+                    tag_list=tag_list,
                     depth=depth,
                     base_index=base,
                     is_impossible=span_is_impossible,
@@ -697,7 +703,7 @@ def _check_is_max_context(doc_spans, cur_span_index, position):
 RawTagResult = collections.namedtuple("RawResult", ["unique_id", "tag_logits"])
 
 
-def write_tag_predictions(loss_method, all_examples, all_features, all_results, n_best_tag_size, stop_margin,
+def write_tag_predictions(all_examples, all_features, all_results, n_best_tag_size,
                           output_tag_prediction_file, output_nbest_file, write_pred):
     logger.info("Writing tag predictions to: %s" % output_tag_prediction_file)
 
@@ -724,30 +730,12 @@ def write_tag_predictions(loss_method, all_examples, all_features, all_results, 
             result = unique_id_to_result[feature.unique_id]
             possible_values = [ind for ind in range(feature.base_index,
                                                     feature.base_index + len(feature.app_tags))]
-            if loss_method == 'multi':
-                depth = np.array(feature.depth, dtype=np.float)
-                tag_probs = np.array(result.tag_logits, dtype=np.float)
-                tag_probs = tag_probs * (0.5 + 0.5 * (depth / depth.max()))
-                tag_indexes = _get_best_tags(tag_probs.tolist(), n_best_tag_size, possible_values)
-            elif loss_method == 'multi-hierarchy':
-                tag_probs = np.array(result.tag_logits['logits'], dtype=np.float)
-                tag_indexes = [feature.base_index]
-                children = result.tag_logits['children']
-                next_tag = children[feature.base_index][tag_probs[children[feature.base_index]].argmax()]
-                while next_tag >= stop_margin and len(tag_indexes) < len(feature.app_tags):
-                    tag_indexes.append(next_tag)
-                    next_tag = children[next_tag][tag_probs[children[next_tag]].argmax()]
-                tag_indexes = tag_indexes[-n_best_tag_size:]
-            else:
-                tag_indexes = _get_best_tags(result.tag_logits, n_best_tag_size, possible_values)
+            tag_indexes = _get_best_tags(result.tag_logits, n_best_tag_size, possible_values)
             for ind in range(len(tag_indexes)):
                 tag_index = tag_indexes[ind]
                 if tag_index == 0:
                     continue
-                if loss_method == 'multi-hierarchy':
-                    tag_logit = result.tag_logits['logits'][tag_index]
-                else:
-                    tag_logit = result.tag_logits[tag_index]
+                tag_logit = result.tag_logits[tag_index]
                 tag_id = feature.app_tags[tag_index - feature.base_index]
                 prelim_predictions.append(
                     _PrelimPrediction(
@@ -1185,7 +1173,7 @@ def form_tree_mask(app, tree, separate=False, accelerate=True):
         return adj, children
 
 
-def form_spatial_mask(app, rel):
+def form_spatial_mask(app, rel, direction='b'):
     def _form_direction_mask(rel, d):
         mask = np.zeros((len(app), len(app)), dtype=np.int)
         reverse_mask = np.zeros((len(app), len(app)), dtype=np.int)
@@ -1204,12 +1192,17 @@ def form_spatial_mask(app, rel):
                 mask[curr, ter] = 1
                 reverse_mask[ter, curr] = 1
         return mask, reverse_mask
-    r, rr = _form_direction_mask(rel, 'rw')
-    l, rl = _form_direction_mask(rel, 'lw')
-    u, ru = _form_direction_mask(rel, 'uw')
-    d, rd = _form_direction_mask(rel, 'dw')
-    l[rr == 1] = 1
-    r[rl == 1] = 1
-    u[rd == 1] = 1
-    d[ru == 1] = 1
-    return np.stack([r, l, u, d])
+    o = []
+    if direction in ['b', 'h']:
+        r, rr = _form_direction_mask(rel, 'rw')
+        l, rl = _form_direction_mask(rel, 'lw')
+        l[rr == 1] = 1
+        r[rl == 1] = 1
+        o += [r, l]
+    if direction in ['b', 'v']:
+        u, ru = _form_direction_mask(rel, 'uw')
+        d, rd = _form_direction_mask(rel, 'dw')
+        u[rd == 1] = 1
+        d[ru == 1] = 1
+        o += [u, d]
+    return np.stack(o)
