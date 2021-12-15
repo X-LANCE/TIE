@@ -1,11 +1,9 @@
 import argparse
 import json
 import os
-# from copy import deepcopy
 
 from tqdm import tqdm
 from bs4 import element, BeautifulSoup as bs
-# import numpy as np
 
 
 def find_direct_contents(e):
@@ -70,8 +68,6 @@ def mask_process(args):
         for f in tqdm(fs):
             if not f.endswith('.points.json'):
                 continue
-            if "0900085" not in f:
-                continue
             rect = json.load(open(os.path.join(d, f)))
             # rect_x = json.load(open(os.path.join(d, f)))
             # min_x, min_y = rect_x['2']['x'], rect_x[2]['y']
@@ -84,8 +80,6 @@ def mask_process(args):
             l, r, u, dd = {}, {}, {}, {}
             lw, rw, uw, dw = {}, {}, {}, {}
             for i in range(len(tuple_rect)):
-                if tuple_rect[i][0] != '386':
-                    continue
                 curr = tuple_rect[i][1]
                 curr_x = (curr['x'], curr['x'] + curr['width'])
                 curr_y = (curr['y'], curr['y'] + curr['height'])
@@ -126,10 +120,8 @@ def mask_process(args):
 
 def main():
     parser = argparse.ArgumentParser()
-    # parser.add_argument('--root_dir', required=True, type=str)
-    # parser.add_argument('--task', required=True, choices=['rect', 'mask', 'rect_mask'])
-    parser.add_argument('--root_dir', default='../../../Dataset/websrc/data/book/09', type=str)
-    parser.add_argument('--task', default='mask', choices=['rect', 'mask', 'rect_mask'])
+    parser.add_argument('--root_dir', required=True, type=str)
+    parser.add_argument('--task', required=True, choices=['rect', 'mask', 'rect_mask'])
     parser.add_argument('--percentage', default=0.5, type=float)
     args = parser.parse_args()
 
