@@ -9,3 +9,7 @@ runs
 runs/*
 code
 code/*
+backup
+backup/*
+tools
+tools/*
