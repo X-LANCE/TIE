@@ -29,7 +29,9 @@ from tqdm import tqdm
 import numpy as np
 import bs4
 from bs4 import BeautifulSoup as bs
-from transformers.tokenization_bert import BasicTokenizer, whitespace_tokenize
+from transformers.models.bert.tokenization_bert import BasicTokenizer, whitespace_tokenize
+from lxml import etree
+from markuplmft.data.tag_utils import tags_dict
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +57,9 @@ class SquadExample(object):
                  tok_to_tags_index=None,
                  tags_to_tok_index=None,
                  orig_tags=None,
-                 tag_depth=None):
+                 tag_depth=None,
+                 xpath_tag_map=None,
+                 xpath_subs_map=None,):
         self.doc_tokens = doc_tokens
         self.qas_id = qas_id
         self.html_tree = html_tree
@@ -71,6 +75,8 @@ class SquadExample(object):
         self.tags_to_tok_index = tags_to_tok_index
         self.orig_tags = orig_tags
         self.tag_depth = tag_depth
+        self.xpath_tag_map = xpath_tag_map
+        self.xpath_subs_map = xpath_subs_map
 
     def __str__(self):
         return self.__repr__()
@@ -110,7 +116,9 @@ class InputFeatures(object):
                  tag_list=None,
                  depth=None,
                  base_index=None,
-                 is_impossible=None):
+                 is_impossible=None,
+                 xpath_tags_seq=None,
+                 xpath_subs_seq=None,):
         self.unique_id = unique_id
         self.page_id = page_id
         self.example_index = example_index
@@ -132,6 +140,8 @@ class InputFeatures(object):
         self.depth = depth
         self.base_index = base_index
         self.is_impossible = is_impossible
+        self.xpath_tags_seq = xpath_tags_seq
+        self.xpath_subs_seq = xpath_subs_seq
 
 
 def html_escape(html):
@@ -143,7 +153,85 @@ def html_escape(html):
     return html
 
 
-def read_squad_examples(input_file, is_training, tokenizer, sample_size=None, simplify=False):
+def get_xpath4tokens(html_fn: str, unique_tids: set):
+    xpath_map = {}
+    tree = etree.parse(html_fn, etree.HTMLParser())
+    nodes = tree.xpath('//*')
+    for node in nodes:
+        tid = node.attrib.get("tid")
+        if int(tid) in unique_tids:
+            xpath_map[int(tid)] = tree.getpath(node)
+    xpath_map[len(nodes)] = "/html"
+    xpath_map[len(nodes) + 1] = "/html"
+    return xpath_map
+
+
+def get_xpath_and_treeid4tokens(html_code, unique_tids, max_depth):
+    unknown_tag_id = len(tags_dict)
+    pad_tag_id = unknown_tag_id + 1
+    max_width = 1000
+    width_pad_id = 1001
+
+    pad_x_tag_seq = [pad_tag_id] * max_depth
+    pad_x_subs_seq = [width_pad_id] * max_depth
+
+    def xpath_soup(element):
+
+        xpath_tags = []
+        xpath_subscripts = []
+        tree_index = []
+        child = element if element.name else element.parent
+        for parent in child.parents:  # type: bs4.element.Tag
+            siblings = parent.find_all(child.name, recursive=False)
+            para_siblings = parent.find_all(True, recursive=False)
+            xpath_tags.append(child.name)
+            xpath_subscripts.append(
+                0 if 1 == len(siblings) else next(i for i, s in enumerate(siblings, 1) if s is child))
+
+            tree_index.append(next(i for i, s in enumerate(para_siblings, 0) if s is child))
+            child = parent
+        xpath_tags.reverse()
+        xpath_subscripts.reverse()
+        tree_index.reverse()
+        return xpath_tags, xpath_subscripts, tree_index
+
+    xpath_tag_map = {}
+    xpath_subs_map = {}
+
+    for tid in unique_tids:
+        element = html_code.find(attrs={'tid': tid})
+        if element is None:
+            xpath_tags = pad_x_tag_seq
+            xpath_subscripts = pad_x_subs_seq
+
+            xpath_tag_map[tid] = xpath_tags
+            xpath_subs_map[tid] = xpath_subscripts
+            continue
+
+        xpath_tags, xpath_subscripts, tree_index = xpath_soup(element)
+
+        assert len(xpath_tags) == len(xpath_subscripts)
+        assert len(xpath_tags) == len(tree_index)
+
+        if len(xpath_tags) > max_depth:
+            xpath_tags = xpath_tags[-max_depth:]
+            xpath_subscripts = xpath_subscripts[-max_depth:]
+
+        xpath_tags = [tags_dict.get(name, unknown_tag_id) for name in xpath_tags]
+        xpath_subscripts = [min(i, max_width) for i in xpath_subscripts]
+
+        # we do not append them to max depth here
+
+        xpath_tags += [pad_tag_id] * (max_depth - len(xpath_tags))
+        xpath_subscripts += [width_pad_id] * (max_depth - len(xpath_subscripts))
+
+        xpath_tag_map[tid] = xpath_tags
+        xpath_subs_map[tid] = xpath_subscripts
+
+    return xpath_tag_map, xpath_subs_map
+
+
+def read_squad_examples(input_file, is_training, tokenizer, base_mode, max_depth=50, sample_size=None, simplify=False):
     """Read a SQuAD json file into a list of SquadExample."""
     with open(input_file, "r", encoding='utf-8') as reader:
         input_data = json.load(reader)["data"]
@@ -154,11 +242,13 @@ def read_squad_examples(input_file, is_training, tokenizer, sample_size=None, si
         return False
 
     def html_to_text_list(h):
-        text_list = []
+        tag_num, text_list = 0, []
         for element in h.descendants:
             if (type(element) == bs4.element.NavigableString) and (element.strip()):
                 text_list.append(element.strip())
-        return text_list
+            if type(element) == bs4.element.Tag:
+                tag_num += 1
+        return text_list, tag_num + 2  # + 2 because we treat the additional 'yes' and 'no' as two special tags.
 
     def html_to_text(h):
         tag_list = set()
@@ -238,6 +328,39 @@ def read_squad_examples(input_file, is_training, tokenizer, sample_size=None, si
         assert len(path) == 0, h
         return w2t, t2w, tags
 
+    def word_tag_offset(html):
+        w_t, t_w, tags, tags_tids = [], [], [], []
+        for element in html.descendants:
+            if type(element) == bs4.element.Tag:
+                content = ' '.join(list(element.strings)).split()
+                t_w.append({'start': len(w_t), 'len': len(content)})
+                tags.append('<' + element.name + '>')
+                tags_tids.append(element['tid'])
+            elif type(element) == bs4.element.NavigableString and element.strip():
+                text = element.split()
+                tid = element.parent['tid']
+                ind = tags_tids.index(tid)
+                for _ in text:
+                    w_t.append(ind)
+        t_w.append({'start': len(w_t), 'len': 1})
+        t_w.append({'start': len(w_t) + 1, 'len': 1})
+        tags.append('<no>')
+        tags.append('<yes>')
+        w_t.append(len(t_w))
+        w_t.append(len(t_w) + 1)
+        return w_t, t_w, tags
+
+    def subtoken_tag_offset(html, s_tok, tok_s):
+        w_t, t_w, tags = word_tag_offset(html)
+        s_t, t_s = [], []
+        unique_tids = set()
+        for i in range(len(s_tok)):
+            s_t.append(w_t[s_tok[i]])
+            unique_tids.add(w_t[s_tok[i]])
+        for i in t_w:
+            t_s.append({'start': tok_s[i['start']], 'end': tok_s[i['start'] + i['len']] - 1})
+        return s_t, t_s, tags, unique_tids
+
     def calculate_depth(html_code):
         def _calc_depth(tag, depth):
             for t in tag.contents:
@@ -271,7 +394,7 @@ def read_squad_examples(input_file, is_training, tokenizer, sample_size=None, si
             html_file = open(osp.join(curr_dir, page_id + '.html')).read()
             html_code = bs(html_file)
 
-            raw_text_list = html_to_text_list(html_code)
+            raw_text_list, tag_num = html_to_text_list(html_code)
             page_text = ' '.join(raw_text_list)
             doc_tokens = []
             char_to_word_offset = []
@@ -291,14 +414,17 @@ def read_squad_examples(input_file, is_training, tokenizer, sample_size=None, si
             doc_tokens.append('yes')
             char_to_word_offset.append(len(doc_tokens) - 1)
 
-            real_text, tag_list = html_to_text(bs(html_file))
-            all_tag_list = all_tag_list | tag_list
-            char_to_word_offset = adjust_offset(char_to_word_offset, real_text)
-            doc_tokens = real_text.split()
-            doc_tokens.append('no')
-            doc_tokens.append('yes')
-            doc_tokens = [i for i in doc_tokens if i]
-            assert len(doc_tokens) == char_to_word_offset[-1] + 1, (len(doc_tokens), char_to_word_offset[-1])
+            if base_mode != 'markuplm':
+                real_text, tag_list = html_to_text(bs(html_file))
+                all_tag_list = all_tag_list | tag_list
+                char_to_word_offset = adjust_offset(char_to_word_offset, real_text)
+                doc_tokens = real_text.split()
+                doc_tokens.append('no')
+                doc_tokens.append('yes')
+                doc_tokens = [i for i in doc_tokens if i]
+                assert len(doc_tokens) == char_to_word_offset[-1] + 1, (len(doc_tokens), char_to_word_offset[-1])
+            else:
+                tag_list = []
 
             if simplify:
                 for qa in website["qas"]:
@@ -323,7 +449,21 @@ def read_squad_examples(input_file, is_training, tokenizer, sample_size=None, si
                         all_doc_tokens.append(sub_token)
 
                 # Generate extra information for features
-                tok_to_tags_index, tags_to_tok_index, orig_tags = word_to_tag_from_text(all_doc_tokens, bs(html_file))
+                if base_mode != 'markuplm':
+                    tok_to_tags_index, tags_to_tok_index, orig_tags = word_to_tag_from_text(all_doc_tokens,
+                                                                                            bs(html_file))
+                    xpath_tag_map, xpath_subs_map = None, None
+                else:
+                    tok_to_tags_index, tags_to_tok_index, orig_tags, unique_tids = subtoken_tag_offset(
+                                                                                            html_code,
+                                                                                            tok_to_orig_index,
+                                                                                            orig_to_tok_index)
+
+                    xpath_tag_map, xpath_subs_map = get_xpath_and_treeid4tokens(html_code,
+                                                                                unique_tids,
+                                                                                max_depth=max_depth)
+
+                assert tok_to_tags_index[-1] == tag_num - 1, (tok_to_tags_index[-1], tag_num - 1)
                 # check_for_index(tags_to_tok_index, all_doc_tokens, bs(html_file))
 
                 # Process each qas, which is mainly calculate the answer position
@@ -382,7 +522,9 @@ def read_squad_examples(input_file, is_training, tokenizer, sample_size=None, si
                         tok_to_tags_index=tok_to_tags_index,
                         tags_to_tok_index=tags_to_tok_index,
                         orig_tags=orig_tags,
-                        tag_depth=tag_depth
+                        tag_depth=tag_depth,
+                        xpath_tag_map=xpath_tag_map,
+                        xpath_subs_map=xpath_subs_map,
                     )
                     examples.append(example)
 
@@ -398,7 +540,8 @@ def convert_examples_to_features(examples, tokenizer, loss_method, max_seq_lengt
                                  doc_stride, max_query_length, is_training, soft_remain, soft_decay,
                                  cls_token='[CLS]', sep_token='[SEP]', pad_token=0,
                                  sequence_a_segment_id=0, sequence_b_segment_id=1,
-                                 cls_token_segment_id=0, pad_token_segment_id=0):
+                                 cls_token_segment_id=0, pad_token_segment_id=0,
+                                 max_depth=50):
     """Loads a data file into a list of `InputBatch`s."""
 
     def label_generating(html_tree, origin_answer_tid, app_tags, base):
@@ -435,6 +578,9 @@ def convert_examples_to_features(examples, tokenizer, loss_method, max_seq_lengt
 
         # if example_index % 100 == 0:
         #     logger.info('Converting %s/%s pos %s neg %s', example_index, len(examples), cnt_pos, cnt_neg)
+
+        xpath_tag_map = example.xpath_tag_map
+        xpath_subs_map = example.xpath_subs_map
 
         query_tokens = tokenizer.tokenize(example.question_text)
         if len(query_tokens) > max_query_length:
@@ -596,6 +742,10 @@ def convert_examples_to_features(examples, tokenizer, loss_method, max_seq_lengt
                     start_position = tok_start_position - doc_start + offset
                     end_position = tok_end_position - doc_start + offset
 
+            pad_x_tag_seq = [216] * max_depth
+            pad_x_subs_seq = [1001] * max_depth
+            xpath_tags_seq = [xpath_tag_map.get(tid, pad_x_tag_seq) for tid in token_to_tag_index]  # ok
+            xpath_subs_seq = [xpath_subs_map.get(tid, pad_x_subs_seq) for tid in token_to_tag_index]  # ok
             answer_tid = label_generating(example.html_tree, answer_tid, app_tags, base)
             features.append(
                 InputFeatures(
@@ -620,6 +770,8 @@ def convert_examples_to_features(examples, tokenizer, loss_method, max_seq_lengt
                     depth=depth,
                     base_index=base,
                     is_impossible=span_is_impossible,
+                    xpath_tags_seq=xpath_tags_seq,
+                    xpath_subs_seq=xpath_subs_seq,
                 ))
             unique_id += 1
 

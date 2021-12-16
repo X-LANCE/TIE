@@ -35,18 +35,14 @@ from transformers import (
     AdamW,
     AutoConfig,
     AutoModelForQuestionAnswering,
-    AutoTokenizer, BertTokenizer, ElectraTokenizer, RobertaTokenizer,
+    AutoTokenizer,
     get_linear_schedule_with_warmup,
 )
+from markuplmft.models.markuplm import MarkupLMConfig, MarkupLMTokenizer, MarkupLMForQuestionAnswering
 
-
-from model import GraphHtmlConfig, GraphHtmlBert, StrucDataset, SubDataset, VConfig, VPLM
+from model import GraphHtmlConfig, GraphHtmlBert, StrucDataset, SubDataset
 from utils import read_squad_examples, convert_examples_to_features, RawResult, RawTagResult,\
     write_tag_predictions, write_predictions_provided_tag
-
-# The following import is the official SQuAD evaluation script (2.0).
-# You can remove it from the dependencies if you are using this script outside of the library
-# We've added it here for automated tests (see examples/test_examples.py file)
 from utils_evaluate import EVAL_OPTS, main as evaluate_on_squad
 
 logger = logging.getLogger(__name__)
@@ -161,6 +157,11 @@ def train(args, train_dataset, model, tokenizer):
                 inputs.update({'spa_mask' : batch[-4]})
                 if args.cnn_feature_dir is not None:
                     inputs.update({'visual_feature': batch[-5]})
+            if args.model_type == 'markuplm':
+                inputs.update({
+                    'xpath_tags_seq': batch[5],
+                    'xpath_subs_seq': batch[6],
+                })
             if args.model_type == 'roberta':
                 del inputs['token_type_ids']
             outputs = model(**inputs)
@@ -263,6 +264,11 @@ def evaluate(args, model, tokenizer, prefix="", write_pred=True):
                           'token_type_ids': batch[2]}
                 if args.cnn_feature_dir is not None:
                     inputs.update({'visual_feature': batch[-5]})
+                if args.model_type == 'markuplm':
+                    inputs.update({
+                        'xpath_tags_seq': batch[5],
+                        'xpath_subs_seq': batch[6],
+                    })
             else:
                 inputs = {'input_ids'      : batch[0],
                           'attention_mask' : batch[1],
@@ -274,6 +280,11 @@ def evaluate(args, model, tokenizer, prefix="", write_pred=True):
                     inputs.update({'spa_mask': batch[-4]})
                     if args.cnn_feature_dir is not None:
                         inputs.update({'visual_feature': batch[-5]})
+                if args.model_type == 'markuplm':
+                    inputs.update({
+                        'xpath_tags_seq': batch[5],
+                        'xpath_subs_seq': batch[6],
+                    })
             if args.model_type == 'roberta':
                 del inputs['token_type_ids']
             feature_indices = batch[3]
@@ -351,6 +362,7 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
         examples, tag_list = read_squad_examples(input_file=input_file,
                                                  is_training=not evaluate,
                                                  tokenizer=tokenizer,
+                                                 base_mode=args.model_type,
                                                  simplify=True)
         if not evaluate:
             tag_list = list(tag_list)
@@ -363,6 +375,7 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
             examples, tag_list = read_squad_examples(input_file=input_file,
                                                      is_training=not evaluate,
                                                      tokenizer=tokenizer,
+                                                     base_mode=args.model_type,
                                                      simplify=True)
             tag_list = list(tag_list)
             tag_list.sort()
@@ -371,6 +384,7 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
         examples, _ = read_squad_examples(input_file=input_file,
                                           is_training=not evaluate,
                                           tokenizer=tokenizer,
+                                          base_mode=args.model_type,
                                           simplify=False,
                                           sample_size=args.sample_size if args.enforce else None)
 
@@ -426,11 +440,16 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
     all_base_index = [f.base_index for f in features]
     all_tag_to_token = [f.tag_to_token_index for f in features]
     all_page_id = [f.page_id for f in features]
+    if args.model_type == 'markuplm':
+        all_xpath_tags_seq = torch.tensor([f.xpath_tags_seq for f in features], dtype=torch.long)
+        all_xpath_subs_seq = torch.tensor([f.xpath_subs_seq for f in features], dtype=torch.long)
+    else:
+        all_xpath_tags_seq, all_xpath_subs_seq = None, None
 
     if evaluate:
         all_feature_index = torch.arange(all_input_ids.size(0), dtype=torch.long)
         dataset = StrucDataset(all_input_ids, all_input_mask, all_segment_ids, all_feature_index, all_tag_depth,
-                               tag_list=all_tag_lists,
+                               all_xpath_tags_seq, all_xpath_subs_seq, tag_list=all_tag_lists,
                                gat_mask=(all_app_tags, all_example_index, all_html_trees), base_index=all_base_index,
                                tag2tok=all_tag_to_token, shape=(args.max_tag_length, args.max_seq_length),
                                training=False, page_id=all_page_id, mask_method=args.mask_method,
@@ -441,7 +460,7 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
         all_answer_tid = torch.tensor([f.answer_tid for f in features],
                                       dtype=torch.long if 'base' in args.loss_method else torch.float)
         dataset = StrucDataset(all_input_ids, all_input_mask, all_segment_ids, all_answer_tid, all_tag_depth,
-                               tag_list=all_tag_lists,
+                               all_xpath_tags_seq, all_xpath_subs_seq, tag_list=all_tag_lists,
                                gat_mask=(all_app_tags, all_example_index, all_html_trees), base_index=all_base_index,
                                tag2tok=all_tag_to_token, shape=(args.max_tag_length, args.max_seq_length),
                                training=True, page_id=all_page_id, mask_method=args.mask_method,
@@ -575,8 +594,6 @@ def main():
     parser.add_argument('--soft_remain', type=float, default=0.7)
     parser.add_argument('--soft_decay', type=float, default=0.5)
     parser.add_argument('--separate_mask', action='store_true')
-    parser.add_argument('--resume_from_PLM', type=str, default=None,
-                        help='the path of the folder contains the state dict file and the tokenizer')
     parser.add_argument('--provided_tag_pred', type=str, default=None)
     parser.add_argument('--mask_method', type=int, default=1,
                         help='how the GAT implement: 0-DOM+SPA; 1-SPA; 2-DOM; 3-DOM-')
@@ -630,13 +647,24 @@ def main():
         # Make sure only the first process in distributed training will download model & vocab
 
     args.model_type = args.model_type.lower()
-    config = AutoConfig.from_pretrained(args.config_name if args.config_name else args.model_name_or_path,
-                                        cache_dir=args.cache_dir)
-    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_name if args.tokenizer_name else args.model_name_or_path,
-                                              do_lower_case=args.do_lower_case, cache_dir=args.cache_dir)
-    model = AutoModelForQuestionAnswering.from_pretrained(args.model_name_or_path,
-                                                          from_tf=bool('.ckpt' in args.model_name_or_path),
-                                                          config=config, cache_dir=args.cache_dir)
+    if args.model_type == 'markuplm':
+        config = MarkupLMConfig.from_pretrained(args.config_name if args.config_name else args.model_name_or_path,
+                                                cache_dir=args.cache_dir)
+        tokenizer = MarkupLMTokenizer.from_pretrained(args.tokenizer_name if args.tokenizer_name
+                                                      else args.model_name_or_path,
+                                                      do_lower_case=args.do_lower_case, cache_dir=args.cache_dir)
+        model = MarkupLMForQuestionAnswering.from_pretrained(args.model_name_or_path,
+                                                             from_tf=bool('.ckpt' in args.model_name_or_path),
+                                                             config=config, cache_dir=args.cache_dir)
+    else:
+        config = AutoConfig.from_pretrained(args.config_name if args.config_name else args.model_name_or_path,
+                                            cache_dir=args.cache_dir)
+        tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_name if args.tokenizer_name
+                                                  else args.model_name_or_path,
+                                                  do_lower_case=args.do_lower_case, cache_dir=args.cache_dir)
+        model = AutoModelForQuestionAnswering.from_pretrained(args.model_name_or_path,
+                                                              from_tf=bool('.ckpt' in args.model_name_or_path),
+                                                              config=config, cache_dir=args.cache_dir)
 
     if args.local_rank == 0:
         torch.distributed.barrier()
@@ -659,17 +687,8 @@ def main():
     # Training
     if args.do_train:
         train_dataset = load_and_cache_examples(args, tokenizer, evaluate=False, split='train')
-        model.resize_token_embeddings(len(tokenizer))
-        if args.resume_from_PLM is not None:
-            model.load_state_dict(torch.load(os.path.join(args.resume_from_PLM, 'pytorch_model.bin')), strict=False)
-            if args.model_type == 'bert':
-                tokenizer = BertTokenizer.from_pretrained(args.resume_from_PLM, do_lower_case=args.do_lower_case)
-            elif args.model_type == 'electra':
-                tokenizer = ElectraTokenizer.from_pretrained(args.resume_from_PLM, do_lower_case=args.do_lower_case)
-            elif args.model_type == 'roberta':
-                tokenizer = RobertaTokenizer.from_pretrained(args.resume_from_PLM, do_lower_case=args.do_lower_case)
-            else:
-                raise NotImplementedError()
+        if model.config.vocab_size != len(tokenizer):
+            model.resize_token_embeddings(len(tokenizer))
         tokenizer.save_pretrained(args.output_dir)
         html_config = GraphHtmlConfig(args, **config.__dict__)
         model = GraphHtmlBert(model, html_config, d=args.direction)
@@ -700,30 +719,7 @@ def main():
     results = {}
     if args.do_eval and args.local_rank in [-1, 0]:
         if args.provided_tag_pred is not None:
-            assert args.resume_from_PLM is not None
-            logger.info("Evaluate the PLM provided with tags: %s", args.resume_from_PLM)
-            if args.model_type == 'bert':
-                tokenizer = BertTokenizer.from_pretrained(args.resume_from_PLM, do_lower_case=args.do_lower_case)
-            elif args.model_type == 'electra':
-                tokenizer = ElectraTokenizer.from_pretrained(args.resume_from_PLM, do_lower_case=args.do_lower_case)
-            elif args.model_type == 'roberta':
-                tokenizer = RobertaTokenizer.from_pretrained(args.resume_from_PLM, do_lower_case=args.do_lower_case)
-            else:
-                raise NotImplementedError()
-            bert_config = AutoConfig.from_pretrained(args.config_name if args.config_name else args.model_name_or_path,
-                                                     cache_dir=args.cache_dir)
-            bert_model = AutoModelForQuestionAnswering.from_pretrained(args.model_name_or_path,
-                                                                       from_tf=bool('.ckpt' in args.model_name_or_path),
-                                                                       config=bert_config, cache_dir=args.cache_dir)
-            bert_model.resize_token_embeddings(len(tokenizer))
-            if 'HPLM' in args.resume_from_PLM:
-                model = bert_model
-            elif 'VPLM' in args.resume_from_PLM:
-                v_config = VConfig('V-PLM', args.model_type, 3, 1024, **config.__dict__)
-                model = VPLM(bert_model, v_config)
-            else:
-                raise NotImplementedError()
-            model.load_state_dict(torch.load(os.path.join(args.resume_from_PLM, 'pytorch_model.bin')))
+            logger.info("Evaluate the PLM provided with tags: %s", args.model_name_or_path)
             model.to(args.device)
             result = evaluate(args, model, tokenizer)
             results.update(result)
@@ -736,21 +732,12 @@ def main():
     
             logger.info("Evaluate the following checkpoints: %s", checkpoints)
     
-            if args.model_type == 'bert':
-                tokenizer = BertTokenizer.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case)
-            elif args.model_type == 'electra':
-                tokenizer = ElectraTokenizer.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case)
-            elif args.model_type == 'roberta':
-                tokenizer = RobertaTokenizer.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case)
+            if args.model_type == 'markuplm':
+                tokenizer = MarkupLMTokenizer.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case)
             else:
-                raise NotImplementedError()
-
-            bert_config = AutoConfig.from_pretrained(args.config_name if args.config_name else args.model_name_or_path,
-                                                     cache_dir=args.cache_dir)
-            bert_model = AutoModelForQuestionAnswering.from_pretrained(args.model_name_or_path,
-                                                                       from_tf=bool('.ckpt' in args.model_name_or_path),
-                                                                       config=bert_config, cache_dir=args.cache_dir)
-            bert_model.resize_token_embeddings(len(tokenizer))
+                tokenizer = AutoTokenizer.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case)
+            if model.config.vocab_size != len(tokenizer):
+                model.resize_token_embeddings(len(tokenizer))
 
             for checkpoint in checkpoints:
                 # Reload the model
@@ -764,12 +751,12 @@ def main():
                 if global_step and args.eval_to_checkpoint and int(global_step) >= args.eval_to_checkpoint:
                     continue
                 html_config = GraphHtmlConfig(args, **config.__dict__)
-                model = GraphHtmlBert(bert_model, html_config, d=args.direction)
-                model.load_state_dict(torch.load(os.path.join(checkpoint, 'pytorch_model.bin')))  # confirmed correct
-                model.to(args.device)
+                eval_model = GraphHtmlBert(model, html_config, d=args.direction)
+                eval_model.load_state_dict(torch.load(os.path.join(checkpoint, 'pytorch_model.bin')))
+                eval_model.to(args.device)
 
                 # Evaluate
-                result = evaluate(args, model, tokenizer, prefix=global_step)
+                result = evaluate(args, eval_model, tokenizer, prefix=global_step)
 
                 result = dict((k + ('_{}'.format(global_step) if global_step else ''), v) for k, v in result.items())
                 results.update(result)

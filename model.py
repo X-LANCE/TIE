@@ -5,7 +5,7 @@ import json
 
 import torch
 import torch.nn as nn
-from transformers.modeling_bert import BertEncoder, BertPreTrainedModel, BertLayer, BertAttention
+from transformers.models.bert.modeling_bert import BertEncoder, BertPreTrainedModel, BertLayer, BertAttention
 from transformers.modeling_outputs import BaseModelOutput
 from transformers import PretrainedConfig
 from torch.utils.data import Dataset
@@ -44,10 +44,16 @@ class SubDataset(Dataset):
         all_tag_to_token = [f.tag_to_token_index for f in features]
         all_page_id = [f.page_id for f in features]
 
+        if self.args.model_type == 'markuplm':
+            all_xpath_tags_seq = torch.tensor([f.xpath_tags_seq for f in features], dtype=torch.long)
+            all_xpath_subs_seq = torch.tensor([f.xpath_subs_seq for f in features], dtype=torch.long)
+        else:
+            all_xpath_tags_seq, all_xpath_subs_seq = None, None
+
         if self.evaluate:
             all_feature_index = torch.arange(all_input_ids.size(0), dtype=torch.long)
             self.dataset = StrucDataset(all_input_ids, all_input_mask, all_segment_ids, all_feature_index,
-                                        all_tag_depth,
+                                        all_tag_depth, all_xpath_tags_seq, all_xpath_subs_seq,
                                         tag_list=all_tag_lists,
                                         gat_mask=(all_app_tags, all_example_index, self.all_html_trees),
                                         base_index=all_base_index,
@@ -61,6 +67,7 @@ class SubDataset(Dataset):
             all_answer_tid = torch.tensor([f.answer_tid for f in features],
                                           dtype=torch.long if self.args.loss_method == 'base' else torch.float)
             self.dataset = StrucDataset(all_input_ids, all_input_mask, all_segment_ids, all_answer_tid, all_tag_depth,
+                                        all_xpath_tags_seq, all_xpath_subs_seq,
                                         tag_list=all_tag_lists,
                                         gat_mask=(all_app_tags, all_example_index, self.all_html_trees),
                                         base_index=all_base_index,
@@ -224,7 +231,6 @@ class GraphHtmlConfig(PretrainedConfig):
         self.num_hidden_layers = args.num_node_block
         self.max_depth_embeddings = args.max_depth_embeddings
         self.mask_method = args.mask_method
-        self.no_ce = args.no_ce
         self.cnn_feature_dim = args.cnn_feature_dim
         self.cnn_mode = args.cnn_mode
 
@@ -357,17 +363,10 @@ class GraphHtmlBert(BertPreTrainedModel):
         self.base_type = config.model_type
         self.loss_method = config.loss_method
         self.mask_method = config.mask_method
-        self.no_ce = config.no_ce
         self.cnn_mode = config.cnn_mode
         self.d = d
-        if config.model_type == 'bert':
-            self.ptm = PTMForQA.bert
-        elif config.model_type == 'electra':
-            self.ptm = PTMForQA.electra
-        elif config.model_type == 'roberta':
-            self.ptm = PTMForQA.roberta
-        else:
-            raise NotImplementedError()
+
+        self.ptm = getattr(PTMForQA, self.model_type)
         self.link = Link(self.method, config)
         self.num_gat_layers = config.num_hidden_layers
         if self.cnn_mode == 'each':
@@ -390,14 +389,23 @@ class GraphHtmlBert(BertPreTrainedModel):
             tag_to_tok=None,
             tag_depth=None,
             visual_feature=None,
+            xpath_tags_seq=None,
+            xpath_subs_seq=None,
     ):
 
-        if self.no_ce:
-            sequence_output = self.ptm.embeddings(
-                input_ids=input_ids, position_ids=position_ids, token_type_ids=token_type_ids,
-                inputs_embeds=inputs_embeds
+        if self.base_type == 'markuplm':
+            outputs = self.ptm(
+                input_ids,
+                attention_mask=attention_mask,
+                token_type_ids=token_type_ids,
+                position_ids=position_ids,
+                head_mask=head_mask,
+                inputs_embeds=inputs_embeds,
+                xpath_tags_seq=xpath_tags_seq,
+                xpath_subs_seq=xpath_subs_seq,
             )
-            outputs = ()
+            sequence_output = outputs[0]
+            outputs = outputs[2:]
         else:
             outputs = self.ptm(
                 input_ids,
@@ -554,12 +562,7 @@ class VPLM(BertPreTrainedModel):
     def __init__(self, ptm, config: VConfig):
         super(VPLM, self).__init__(config)
         self.base_type = config.model_type1
-        if config.model_type1 == 'bert':
-            self.ptm = ptm.bert
-        elif config.model_type1 == 'electra':
-            self.ptm = ptm.electra
-        else:
-            raise NotImplementedError()
+        self.ptm = getattr(ptm, self.base_type)
         self.struc = nn.ModuleList([VBlock(config) for _ in range(config.num_node_block)])
         self.qa_outputs = ptm.qa_outputs
 
