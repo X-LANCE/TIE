@@ -358,7 +358,11 @@ def read_squad_examples(input_file, is_training, tokenizer, base_mode, max_depth
             s_t.append(w_t[s_tok[i]])
             unique_tids.add(w_t[s_tok[i]])
         for i in t_w:
-            t_s.append({'start': tok_s[i['start']], 'end': tok_s[i['start'] + i['len']] - 1})
+            try:
+                t_s.append({'start': tok_s[i['start']], 'end': tok_s[i['start'] + i['len']] - 1})
+            except IndexError:
+                assert i == t_w[-1]
+                t_s.append({'start': tok_s[i['start']], 'end': len(s_tok) - 1})
         return s_t, t_s, tags, unique_tids
 
     def calculate_depth(html_code):
