@@ -255,7 +255,7 @@ class Link(nn.Module):
         modified_tag2token = self.deduce_direct_string(tag_to_token)
         outputs = torch.matmul(modified_tag2token, inputs)
 
-        sequential_ids = self.sequential_ids[:, :inputs.size(1)]
+        sequential_ids = self.sequential_ids[:, :outputs.size(1)]
         sequential_embeddings = self.sequential_embeddings(sequential_ids)
         outputs = outputs + sequential_embeddings
         if self.add_position_embeddings:
