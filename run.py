@@ -162,6 +162,7 @@ def train(args, train_dataset, model, tokenizer):
                     'xpath_tags_seq': batch[5],
                     'xpath_subs_seq': batch[6],
                 })
+                del inputs['token_type_ids']
             if args.model_type == 'roberta':
                 del inputs['token_type_ids']
             outputs = model(**inputs)
@@ -264,11 +265,6 @@ def evaluate(args, model, tokenizer, prefix="", write_pred=True):
                           'token_type_ids': batch[2]}
                 if args.cnn_feature_dir is not None:
                     inputs.update({'visual_feature': batch[-5]})
-                if args.model_type == 'markuplm':
-                    inputs.update({
-                        'xpath_tags_seq': batch[5],
-                        'xpath_subs_seq': batch[6],
-                    })
             else:
                 inputs = {'input_ids'      : batch[0],
                           'attention_mask' : batch[1],
@@ -280,11 +276,12 @@ def evaluate(args, model, tokenizer, prefix="", write_pred=True):
                     inputs.update({'spa_mask': batch[-4]})
                     if args.cnn_feature_dir is not None:
                         inputs.update({'visual_feature': batch[-5]})
-                if args.model_type == 'markuplm':
-                    inputs.update({
-                        'xpath_tags_seq': batch[5],
-                        'xpath_subs_seq': batch[6],
-                    })
+            if args.model_type == 'markuplm':
+                inputs.update({
+                    'xpath_tags_seq': batch[5],
+                    'xpath_subs_seq': batch[6],
+                })
+                del inputs['token_type_ids']
             if args.model_type == 'roberta':
                 del inputs['token_type_ids']
             feature_indices = batch[3]
