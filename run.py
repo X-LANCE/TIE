@@ -350,7 +350,7 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
     cached_features_file = '{}_{}'.format(base_cached_features_file,
                                           args.loss_method if 'soft' not in args.loss_method
                                           else '{}_{}'.format(args.soft_remain, args.soft_decay))
-    cached_features_file += 'V'
+    # cached_features_file += 'V'
 
     if os.path.exists(cached_features_file) and not args.overwrite_cache and not args.enforce:
         logger.info("Loading features from cached file %s", cached_features_file)

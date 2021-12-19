@@ -344,10 +344,10 @@ def read_squad_examples(input_file, is_training, tokenizer, base_mode, max_depth
                     w_t.append(ind)
         t_w.append({'start': len(w_t), 'len': 1})
         t_w.append({'start': len(w_t) + 1, 'len': 1})
+        w_t.append(len(tags))
+        w_t.append(len(tags) + 1)
         tags.append('<no>')
         tags.append('<yes>')
-        w_t.append(len(t_w))
-        w_t.append(len(t_w) + 1)
         return w_t, t_w, tags
 
     def subtoken_tag_offset(html, s_tok, tok_s):
@@ -682,7 +682,7 @@ def convert_examples_to_features(examples, tokenizer, loss_method, max_seq_lengt
                 depth.append(example.tag_depth[ind])
             # if len(app_tags) > max_tag_length - 4:
             if len(app_tags) > max_tag_length - len(query_tokens) - 3:
-                raise ValueError('Max tag length is not big enough')
+                raise ValueError('Max tag length is not big enough to contain {}'.format(len(app_tags)))
             for i in range(doc_span.length):
                 split_token_index = doc_span.start + i
                 token_to_orig_map[len(tokens)] = example.tok_to_orig_index[split_token_index]

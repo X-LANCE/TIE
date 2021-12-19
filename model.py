@@ -366,7 +366,7 @@ class GraphHtmlBert(BertPreTrainedModel):
         self.cnn_mode = config.cnn_mode
         self.d = d
 
-        self.ptm = getattr(PTMForQA, self.model_type)
+        self.ptm = getattr(PTMForQA, self.base_type)
         self.link = Link(self.method, config)
         self.num_gat_layers = config.num_hidden_layers
         if self.cnn_mode == 'each':

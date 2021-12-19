@@ -125,17 +125,6 @@ def main():
     parser.add_argument('--percentage', default=0.5, type=float)
     args = parser.parse_args()
 
-    # for d, _, fs in os.walk(args.root_dir):
-    #     for f in fs:
-    #         if not f.endswith('.points.json'):
-    #             continue
-    #         selected_rect = json.load(open(os.path.join(d, f)))
-    #         html = bs(open(os.path.join(d, f.split('.')[0] + '.html')))
-    #         for key in selected_rect:
-    #             e = html.find(tid=key)
-    #             if e.name == 'a':
-    #                 pass
-
     if 'rect' in args.task:
         rect_process(args)
     if 'mask' in args.task:
