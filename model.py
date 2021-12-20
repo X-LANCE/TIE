@@ -220,19 +220,20 @@ class StrucDataset(Dataset):
 
 class GraphHtmlConfig(PretrainedConfig):
     def __init__(self,
-                 args,
+                 args=None,
                  **kwargs):
         self.hidden_size = kwargs.pop("hidden_size", None)
         self.max_position_embeddings = kwargs.pop("max_position_embeddings", None)
         super().__init__(**kwargs)
-        self.method = args.method
-        self.model_type = args.model_type
-        self.loss_method = args.loss_method
-        self.num_hidden_layers = args.num_node_block
-        self.max_depth_embeddings = args.max_depth_embeddings
-        self.mask_method = args.mask_method
-        self.cnn_feature_dim = args.cnn_feature_dim
-        self.cnn_mode = args.cnn_mode
+        if args is not None:
+            self.method = args.method
+            self.model_type = args.model_type
+            self.loss_method = args.loss_method
+            self.num_hidden_layers = args.num_node_block
+            self.max_depth_embeddings = args.max_depth_embeddings
+            self.mask_method = args.mask_method
+            self.cnn_feature_dim = args.cnn_feature_dim
+            self.cnn_mode = args.cnn_mode
 
 
 class Link(nn.Module):
