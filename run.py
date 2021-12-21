@@ -747,11 +747,15 @@ def main():
                 logging.getLogger("transformers.modeling_utils").setLevel(logging.WARN)  # Reduce model loading logs
     
             logger.info("Evaluate the following checkpoints: %s", checkpoints)
-    
-            if args.model_type == 'markuplm':
-                tokenizer = MarkupLMTokenizer.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case)
+
+            if 'checkpoint' in args.output_dir:
+                tokenizer_dir = os.path.split(args.output_dir[:-1])[0]
             else:
-                tokenizer = AutoTokenizer.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case)
+                tokenizer_dir = args.output_dir
+            if args.model_type == 'markuplm':
+                tokenizer = MarkupLMTokenizer.from_pretrained(tokenizer_dir, do_lower_case=args.do_lower_case)
+            else:
+                tokenizer = AutoTokenizer.from_pretrained(tokenizer_dir, do_lower_case=args.do_lower_case)
             if model.config.vocab_size != len(tokenizer):
                 model.resize_token_embeddings(len(tokenizer))
 
