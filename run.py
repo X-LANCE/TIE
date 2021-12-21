@@ -18,6 +18,7 @@
 from __future__ import absolute_import, division, print_function
 
 import argparse
+import json
 import logging
 import os
 import random
@@ -40,7 +41,7 @@ from transformers import (
 )
 from markuplmft.models.markuplm import MarkupLMConfig, MarkupLMTokenizer, MarkupLMForQuestionAnswering
 
-from model import GraphHtmlConfig, GraphHtmlBert, StrucDataset, SubDataset
+from model import GraphHtmlConfig, GraphHtmlBert, StrucDataset, SubDataset, SliceDataset
 from utils import read_squad_examples, convert_examples_to_features, RawResult, RawTagResult,\
     write_tag_predictions, write_predictions_provided_tag
 from utils_evaluate import EVAL_OPTS, main as evaluate_on_squad
@@ -340,7 +341,8 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
 
     # Load data features from cache or dataset file
     input_file = args.predict_file if evaluate else args.train_file
-    base_cached_features_file = os.path.join(os.path.dirname(input_file), 'cached', 'cached_{}_{}_{}'.format(
+    base_cached_features_file = os.path.join(os.path.dirname(input_file), 'cached', '{}_{}_{}_{}'.format(
+        'cached' if not args.slice_cache else 'slice',
         split,
         list(filter(None, args.model_name_or_path.split('/'))).pop(),
         str(args.max_seq_length)))
@@ -351,7 +353,9 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
 
     if os.path.exists(cached_features_file) and not args.overwrite_cache and not args.enforce:
         logger.info("Loading features from cached file %s", cached_features_file)
-        if args.separate_read and not evaluate:
+        if args.slice_cache:
+            offsets = json.load(open(cached_features_file + '_offsets'))
+        elif args.separate_read and not evaluate:
             total = torch.load(cached_features_file + '_total')
             features = None
         else:
@@ -397,14 +401,22 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
                                                 is_training=not evaluate)
         if args.local_rank in [-1, 0] and not args.enforce:
             logger.info("Saving features into cached file %s", cached_features_file)
-            torch.save(features, cached_features_file)
-            if args.separate_read and not evaluate:
-                random.shuffle(features)
-                total = len(features)
-                num = ((total // 2) // 64) * 64
-                torch.save(features[:num], cached_features_file + '_sub1')
-                torch.save(features[num:], cached_features_file + '_sub2')
-                torch.save(total, cached_features_file + '_total')
+            if args.slice_cache:
+                offsets = []
+                with open(cached_features_file, 'w') as w:
+                    for f in features:
+                        offsets.append(w.tell())
+                        w.write(f.to_json() + '\n')
+                json.dump(offsets, open(cached_features_file + '_offsets', 'w'))
+            else:
+                torch.save(features, cached_features_file)
+                if args.separate_read and not evaluate:
+                    random.shuffle(features)
+                    total = len(features)
+                    num = ((total // 2) // 64) * 64
+                    torch.save(features[:num], cached_features_file + '_sub1')
+                    torch.save(features[num:], cached_features_file + '_sub2')
+                    torch.save(total, cached_features_file + '_total')
 
     if args.local_rank == 0 and not evaluate:
         torch.distributed.barrier()  # Make sure only the first process in distributed training process the dataset,
@@ -419,10 +431,17 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
         torch.save(total, cached_features_file + '_total')
         raise SystemError('Mission complete!')
 
-    if args.separate_read and not evaluate:
+    if args.slice_cache and not evaluate:
+        all_html_trees = [e.html_tree for e in examples]
+        dataset = SliceDataset(file=cached_features_file, offsets=offsets, html_trees=all_html_trees,
+                               shape=(args.max_tag_length, args.max_seq_length),
+                               training=False, mask_method=args.mask_method,
+                               mask_dir=os.path.dirname(input_file) if args.mask_method < 2 else None,
+                               separate=args.separate_mask, cnn_feature_dir=args.cnn_feature_dir,
+                               direction=args.direction, loss_method=args.loss_method)
+        return dataset
+    elif args.separate_read and not evaluate:
         dataset = SubDataset(examples, evaluate, total, cached_features_file, 2, args)
-        if evaluate:
-            dataset = (dataset, examples, features)
         return dataset
 
     # Convert to Tensors and build dataset
@@ -601,6 +620,7 @@ def main():
     parser.add_argument('--cnn_mode', default="none", choices=["none", "once", "each"])
     parser.add_argument('--direction', default='b', choices=['b', 'v', 'h'])
     parser.add_argument('--load_epoch', action='store_true')
+    parser.add_argument('--slice_cache', action='store_true')
     args = parser.parse_args()
 
     if os.path.exists(args.output_dir) and os.listdir(

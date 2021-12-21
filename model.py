@@ -93,7 +93,41 @@ class SubDataset(Dataset):
         return self.total
 
 
-class StrucDataset(Dataset):
+class BaseDataset(Dataset):
+    def _init_spatial_mask(self):
+        if self.mask_dir is None:
+            self.spatial_mask = None
+            return
+        self.spatial_mask = {}
+        for d, _, fs in os.walk(self.mask_dir):
+            for f in fs:
+                if not f.endswith('.spatial.json'):
+                    continue
+                domain = d.split('/')[-3][:2]
+                page = f.split('.')[0]
+                self.spatial_mask[domain + page] = json.load(open(os.path.join(d, f)))
+        return
+
+    def _init_cnn_feature(self):
+        if self.cnn_feature_dir is None:
+            self.cnn_feature = None
+            print('None!')
+            return
+        self.cnn_feature = {}
+        cnn_feature_dir = os.walk(self.cnn_feature_dir)
+        for d, _, fs in cnn_feature_dir:
+            for f in fs:
+                if f.split('.')[-1] != 'npy':
+                    continue
+                domain = d.split('/')[-3][:2]
+                page = f.split('.')[0]
+                temp = torch.as_tensor(np.load(os.path.join(d, f)), dtype=torch.float)
+                self.cnn_feature[domain + page] = torch.cat([temp, torch.zeros_like(temp[0]).unsqueeze(0)], dim=0)
+        print(len(self.cnn_feature))
+        return
+
+
+class StrucDataset(BaseDataset):
     """Dataset wrapping tensors.
 
     Each sample will be retrieved by indexing tensors along the first dimension.
@@ -185,37 +219,104 @@ class StrucDataset(Dataset):
     def __len__(self):
         return len(self.tensors[0])
 
-    def _init_spatial_mask(self):
-        if self.mask_dir is None:
-            self.spatial_mask = None
-            return
-        self.spatial_mask = {}
-        for d, _, fs in os.walk(self.mask_dir):
-            for f in fs:
-                if not f.endswith('.spatial.json'):
-                    continue
-                domain = d.split('/')[-3][:2]
-                page = f.split('.')[0]
-                self.spatial_mask[domain + page] = json.load(open(os.path.join(d, f)))
-        return
 
-    def _init_cnn_feature(self):
-        if self.cnn_feature_dir is None:
-            self.cnn_feature = None
-            print('None!')
-            return
-        self.cnn_feature = {}
-        cnn_feature_dir = os.walk(self.cnn_feature_dir)
-        for d, _, fs in cnn_feature_dir:
-            for f in fs:
-                if f.split('.')[-1] != 'npy':
-                    continue
-                domain = d.split('/')[-3][:2]
-                page = f.split('.')[0]
-                temp = torch.as_tensor(np.load(os.path.join(d, f)), dtype=torch.float)
-                self.cnn_feature[domain + page] = torch.cat([temp, torch.zeros_like(temp[0]).unsqueeze(0)], dim=0)
-        print(len(self.cnn_feature))
-        return
+class SliceDataset(BaseDataset):
+    def __init__(self, file, offsets, html_trees=None, shape=None, training=True, mask_method=1, mask_dir=None,
+                 direction=None, separate=False, cnn_feature_dir=None, loss_method='multi-soft'):
+        self.file = open(file)
+        self.offsets = offsets
+        self.html_trees = html_trees
+        self.shape = shape
+        self.training = training
+        self.mask_method = mask_method
+        self.mask_dir = mask_dir
+        self.direction = direction
+        self.separate = separate
+        self.cnn_feature_dir = cnn_feature_dir
+        self.loss_method = loss_method
+        self._init_spatial_mask()
+        self._init_cnn_feature()
+        if self.training:
+            self.tensor_keys = ['input_ids', 'input_mask', 'segment_ids', 'answer_tid',
+                                'depth', 'xpath_tags_seq', 'xpath_subs_seq']
+        else:
+            self.tensor_keys = ['input_ids', 'input_mask', 'segment_ids', 'feature_index',
+                                'depth', 'xpath_tags_seq', 'xpath_subs_seq']
+
+    # noinspection PyTypeChecker
+    def __getitem__(self, index):
+        anchor = self.offsets[index]
+        self.file.seek(anchor, whence=0)
+        feature = json.dumps(self.file.readline())
+
+        output = []
+        for k in self.tensor_keys:
+            if k == 'feature_index':
+                output.append(torch.tensor(index, dtype=torch.long))
+            elif k == 'answer_tid':
+                output.append(torch.tensor(feature[k], dtype=torch.long if 'base' in self.loss_method else torch.float))
+            else:
+                output.append(torch.tensor(feature[k], dtype=torch.long))
+
+        tag_to_token_index = feature['tag_to_token_index']
+        app_tags = feature['app_tags']
+        example_index = feature['example_index']
+        html_tree = self.html_trees[example_index]
+        base = feature['base_index']
+
+        if self.cnn_feature is not None:
+            page_id, ind = feature['page_id'], torch.tensor(feature["tag_list"], dtype=torch.long)
+            raw_cnn_feature = self.cnn_feature[page_id]
+            assert ind.dim() == 1
+            cnn_num, cnn_dim = raw_cnn_feature.size()
+            ind[ind >= cnn_num] = cnn_num - 1
+            ind[ind == -1] = cnn_num - 1
+            ind = ind.unsqueeze(1).repeat([1, cnn_dim])
+            cnn_feature = torch.gather(raw_cnn_feature, 0, ind)
+            output.append(cnn_feature)
+
+        if self.spatial_mask is not None and self.mask_method < 2:
+            if self.direction == 'b':
+                spa_mask = torch.zeros((4, self.shape[0], self.shape[0]), dtype=torch.long)
+            else:
+                spa_mask = torch.zeros((2, self.shape[0], self.shape[0]), dtype=torch.long)
+            spa_mask[:, :base, :base + len(app_tags) + 1] = 1
+            spa_mask[:, base + len(app_tags), :base + len(app_tags) + 1] = 1
+            temp = form_spatial_mask(app_tags, self.spatial_mask[feature['page_id']], self.direction)
+            spa_mask[:, base:base + len(app_tags), base:base + len(app_tags)] = torch.tensor(temp)
+            output.append(spa_mask)
+
+        gat_mask = torch.zeros((1, self.shape[0], self.shape[0]), dtype=torch.long)
+        gat_mask[:, :base, :base + len(app_tags) + 1] = 1
+        gat_mask[:, base + len(app_tags), :base + len(app_tags) + 1] = 1
+        temp = torch.tensor(form_tree_mask(app_tags, html_tree, separate=self.separate,
+                                           accelerate=self.mask_method != 3))
+        if self.separate:  # TODO multiple mask and variable total head number implementation
+            gat_mask = gat_mask.repeat(2, 1, 1)
+            gat_mask[:, base:base + len(app_tags), base:base + len(app_tags)] = torch.tensor(temp[0:2])
+            tree_children = torch.tensor(temp[2])
+        else:
+            gat_mask[:, base:base + len(app_tags), base:base + len(app_tags)] = torch.tensor(temp[0])
+            tree_children = torch.tensor(temp[1])
+        output.append(gat_mask)
+
+        children = torch.zeros((self.shape[0], self.shape[0]), dtype=torch.long)
+        tree_children[tree_children.sum(dim=1) == 0, 0] = 1
+        children[base:base + len(app_tags), base:base + len(app_tags)] = tree_children
+        children[base, 0] = 1
+        output.append(children)
+
+        pooling_matrix = np.zeros(self.shape, dtype=np.double)
+        for i in range(len(tag_to_token_index)):
+            temp = tag_to_token_index[i]
+            pooling_matrix[i][temp[0]: temp[1] + 1] = 1 / (temp[1] - temp[0] + 1)
+        pooling_matrix = torch.tensor(pooling_matrix, dtype=torch.float)
+        output.append(pooling_matrix)
+
+        return tuple(item for item in output)
+
+    def __len__(self):
+        return len(self.offsets)
 
 
 class GraphHtmlConfig(PretrainedConfig):

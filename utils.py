@@ -143,6 +143,9 @@ class InputFeatures(object):
         self.xpath_tags_seq = xpath_tags_seq
         self.xpath_subs_seq = xpath_subs_seq
 
+    def to_json(self):
+        return json.dumps(self.__dict__)
+
 
 def html_escape(html):
     html = html.replace('&quot;', '"')
