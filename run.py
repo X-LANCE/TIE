@@ -435,7 +435,7 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
         all_html_trees = [e.html_tree for e in examples]
         dataset = SliceDataset(file=cached_features_file, offsets=offsets, html_trees=all_html_trees,
                                shape=(args.max_tag_length, args.max_seq_length),
-                               training=False, mask_method=args.mask_method,
+                               training=True, mask_method=args.mask_method,
                                mask_dir=os.path.dirname(input_file) if args.mask_method < 2 else None,
                                separate=args.separate_mask, cnn_feature_dir=args.cnn_feature_dir,
                                direction=args.direction, loss_method=args.loss_method)

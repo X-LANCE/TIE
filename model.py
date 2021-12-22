@@ -246,8 +246,8 @@ class SliceDataset(BaseDataset):
     # noinspection PyTypeChecker
     def __getitem__(self, index):
         anchor = self.offsets[index]
-        self.file.seek(anchor, whence=0)
-        feature = json.dumps(self.file.readline())
+        self.file.seek(anchor, 0)
+        feature = json.loads(self.file.readline())
 
         output = []
         for k in self.tensor_keys:
