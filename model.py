@@ -246,7 +246,7 @@ class SliceDataset(BaseDataset):
     # noinspection PyTypeChecker
     def __getitem__(self, index):
         anchor = self.offsets[index]
-        self.file.seek(anchor, 0)
+        self.file.seek(anchor)
         feature = json.loads(self.file.readline())
 
         output = []

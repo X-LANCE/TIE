@@ -30,10 +30,10 @@ import numpy as np
 import torch
 from torch.utils.data import (DataLoader, RandomSampler, SequentialSampler)
 from torch.utils.data.distributed import DistributedSampler
+from torch.optim import AdamW
 from tensorboardX import SummaryWriter
 from transformers import (
     WEIGHTS_NAME,
-    AdamW,
     AutoConfig,
     AutoModelForQuestionAnswering,
     AutoTokenizer,
@@ -75,7 +75,8 @@ def train(args, train_dataset, model, tokenizer):
         train_sampler = SequentialSampler(train_dataset)
     else:
         train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
-    train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
+    train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size,
+                                  num_workers=args.num_workers)
 
     if args.max_steps > 0:
         t_total = args.max_steps
@@ -85,13 +86,29 @@ def train(args, train_dataset, model, tokenizer):
 
     # Prepare optimizer and schedule (linear warmup and decay)
     no_decay = ['bias', 'LayerNorm.weight']
-    optimizer_grouped_parameters = [
-        {'params': [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
-         'weight_decay': args.weight_decay},
-        {'params': [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
-    ]
+    if args.base_lr is not None:
+        optimizer_grouped_parameters = [
+            {'params': [p for n, p in model.named_parameters() if n.startswith('ptm') and
+                        not any(nd in n for nd in no_decay)],
+             'lr': args.base_lr, 'weight_decay': args.weight_decay},
+            {'params': [p for n, p in model.named_parameters() if n.startswith('ptm') and
+                        any(nd in n for nd in no_decay)],
+             'lr': args.base_lr, 'weight_decay': 0.0},
+            {'params': [p for n, p in model.named_parameters() if not n.startswith('ptm') and
+                        not any(nd in n for nd in no_decay)],
+             'weight_decay': args.weight_decay},
+            {'params': [p for n, p in model.named_parameters() if not n.startswith('ptm') and
+                        any(nd in n for nd in no_decay) and 'ptm' not in n],
+             'weight_decay': 0.0}
+        ]
+    else:
+        optimizer_grouped_parameters = [
+            {'params': [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
+             'weight_decay': args.weight_decay},
+            {'params': [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
+        ]
     optimizer = AdamW(optimizer_grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon)
-    scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=args.warmup_steps,
+    scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=int(args.warmup_steps * t_total),
                                                 num_training_steps=t_total)
     if args.fp16:
         try:
@@ -342,7 +359,7 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
     # Load data features from cache or dataset file
     input_file = args.predict_file if evaluate else args.train_file
     base_cached_features_file = os.path.join(os.path.dirname(input_file), 'cached', '{}_{}_{}_{}'.format(
-        'cached' if not args.slice_cache else 'slice',
+        'cached' if not args.slice_cache or evaluate else 'slice',
         split,
         list(filter(None, args.model_name_or_path.split('/'))).pop(),
         str(args.max_seq_length)))
@@ -401,7 +418,7 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
                                                 is_training=not evaluate)
         if args.local_rank in [-1, 0] and not args.enforce:
             logger.info("Saving features into cached file %s", cached_features_file)
-            if args.slice_cache:
+            if args.slice_cache and not evaluate:
                 offsets = []
                 with open(cached_features_file, 'w') as w:
                     for f in features:
@@ -547,7 +564,7 @@ def main():
                         help="Total number of training epochs to perform.")
     parser.add_argument("--max_steps", default=-1, type=int,
                         help="If > 0: set total number of training steps to perform. Override num_train_epochs.")
-    parser.add_argument("--warmup_steps", default=0, type=int,
+    parser.add_argument("--warmup_steps", default=0, type=float,
                         help="Linear warmup over warmup_steps.")
     parser.add_argument("--n_best_size", default=20, type=int,
                         help="The total number of n-best predictions to generate in the nbest_predictions.json output "
@@ -621,6 +638,8 @@ def main():
     parser.add_argument('--direction', default='b', choices=['b', 'v', 'h'])
     parser.add_argument('--load_epoch', action='store_true')
     parser.add_argument('--slice_cache', action='store_true')
+    parser.add_argument('--base_lr', default=None, type=float)
+    parser.add_argument('--num_workers', default=0, type=int)
     args = parser.parse_args()
 
     if os.path.exists(args.output_dir) and os.listdir(
