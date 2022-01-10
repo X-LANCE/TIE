@@ -378,6 +378,8 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
                                           else '{}_{}'.format(args.soft_remain, args.soft_decay))
     if args.add_xpath:
         cached_features_file += 'X'
+    if args.temp:
+        cached_features_file += 'T'
     cached_features_file = cached_features_file.replace('markuplm_base', 'markuplm').replace('markuplm_large', 'markuplm')
     cached_features_file = cached_features_file.replace('roberta_base', 'roberta').replace('roberta_large', 'roberta')
 
@@ -394,26 +396,28 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
                                                  is_training=not evaluate,
                                                  tokenizer=tokenizer,
                                                  base_mode=args.model_type,
+                                                 temp=args.temp,
                                                  simplify=True)
-        if not evaluate:
+        if not evaluate and not args.temp:
             tag_list = list(tag_list)
             tag_list.sort()
             tokenizer.add_tokens(tag_list)
 
         #!
-        if args.temp:
-            features = [f for f in features if not f.is_impossible]
-            torch.save(features, cached_features_file + 'A')
-            raise SystemError('Mission complete!')
-            pass
+        # if args.temp:
+            # features = [f for f in features if not f.is_impossible]
+            # torch.save(features, cached_features_file + 'A')
+            # raise SystemError('Mission complete!')
+            # pass
     else:
         logger.info("Creating features from dataset file at %s", input_file)
 
-        if not evaluate:
+        if not evaluate and not args.temp:
             examples, tag_list = read_squad_examples(input_file=input_file,
                                                      is_training=not evaluate,
                                                      tokenizer=tokenizer,
                                                      base_mode=args.model_type,
+                                                     temp=args.temp,
                                                      simplify=True)
             tag_list = list(tag_list)
             tag_list.sort()
@@ -423,6 +427,7 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
                                           is_training=not evaluate,
                                           tokenizer=tokenizer,
                                           base_mode=args.model_type,
+                                          temp=args.temp,
                                           simplify=False,
                                           sample_size=args.sample_size if args.enforce else None)
 

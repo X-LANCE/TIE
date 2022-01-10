@@ -238,7 +238,7 @@ def get_xpath_and_treeid4tokens(html_code, unique_tids, max_depth):
     return xpath_tag_map, xpath_subs_map
 
 
-def read_squad_examples(input_file, is_training, tokenizer, base_mode, max_depth=50, sample_size=None, simplify=False):
+def read_squad_examples(input_file, is_training, tokenizer, base_mode, max_depth=50, sample_size=None, temp=False, simplify=False):
     """Read a SQuAD json file into a list of SquadExample."""
     with open(input_file, "r", encoding='utf-8') as reader:
         input_data = json.load(reader)["data"]
@@ -425,7 +425,7 @@ def read_squad_examples(input_file, is_training, tokenizer, base_mode, max_depth
             doc_tokens.append('yes')
             char_to_word_offset.append(len(doc_tokens) - 1)
 
-            if base_mode != 'markuplm':
+            if base_mode != 'markuplm' and not temp:
                 real_text, tag_list = html_to_text(bs(html_file))
                 all_tag_list = all_tag_list | tag_list
                 char_to_word_offset = adjust_offset(char_to_word_offset, real_text)
@@ -460,7 +460,7 @@ def read_squad_examples(input_file, is_training, tokenizer, base_mode, max_depth
                         all_doc_tokens.append(sub_token)
 
                 # Generate extra information for features
-                if base_mode != 'markuplm':
+                if base_mode != 'markuplm' and not temp:
                     tok_to_tags_index, tags_to_tok_index, orig_tags = word_to_tag_from_text(all_doc_tokens,
                                                                                             bs(html_file))
                     xpath_tag_map, xpath_subs_map = None, None
@@ -470,9 +470,12 @@ def read_squad_examples(input_file, is_training, tokenizer, base_mode, max_depth
                                                                                             tok_to_orig_index,
                                                                                             orig_to_tok_index)
 
-                    xpath_tag_map, xpath_subs_map = get_xpath_and_treeid4tokens(html_code,
-                                                                                unique_tids,
-                                                                                max_depth=max_depth)
+                    if base_mode == 'markuplm':
+                        xpath_tag_map, xpath_subs_map = get_xpath_and_treeid4tokens(html_code,
+                                                                                    unique_tids,
+                                                                                    max_depth=max_depth)
+                    else:
+                        xpath_tag_map, xpath_subs_map = None, None
 
                 assert tok_to_tags_index[-1] == tag_num - 1, (tok_to_tags_index[-1], tag_num - 1)
                 # check_for_index(tags_to_tok_index, all_doc_tokens, bs(html_file))
