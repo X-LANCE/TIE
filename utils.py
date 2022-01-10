@@ -118,7 +118,9 @@ class InputFeatures(object):
                  base_index=None,
                  is_impossible=None,
                  xpath_tags_seq=None,
-                 xpath_subs_seq=None,):
+                 xpath_subs_seq=None,
+                 xpath_tags_seq_tag=None,
+                 xpath_subs_seq_tag=None,):
         self.unique_id = unique_id
         self.page_id = page_id
         self.example_index = example_index
@@ -142,6 +144,8 @@ class InputFeatures(object):
         self.is_impossible = is_impossible
         self.xpath_tags_seq = xpath_tags_seq
         self.xpath_subs_seq = xpath_subs_seq
+        self.xpath_tags_seq_tag = xpath_tags_seq_tag
+        self.xpath_subs_seq_tag = xpath_subs_seq_tag
 
     def to_json(self):
         return json.dumps(self.__dict__)
@@ -356,10 +360,10 @@ def read_squad_examples(input_file, is_training, tokenizer, base_mode, max_depth
     def subtoken_tag_offset(html, s_tok, tok_s):
         w_t, t_w, tags = word_tag_offset(html)
         s_t, t_s = [], []
-        unique_tids = set()
+        unique_tids = set(range(len(tags)))
         for i in range(len(s_tok)):
             s_t.append(w_t[s_tok[i]])
-            unique_tids.add(w_t[s_tok[i]])
+            # unique_tids.add(w_t[s_tok[i]])
         for i in t_w:
             try:
                 t_s.append({'start': tok_s[i['start']], 'end': tok_s[i['start'] + i['len']] - 1})
@@ -751,8 +755,13 @@ def convert_examples_to_features(examples, tokenizer, loss_method, max_seq_lengt
 
             pad_x_tag_seq = [216] * max_depth
             pad_x_subs_seq = [1001] * max_depth
-            xpath_tags_seq = [xpath_tag_map.get(tid, pad_x_tag_seq) for tid in token_to_tag_index]  # ok
-            xpath_subs_seq = [xpath_subs_map.get(tid, pad_x_subs_seq) for tid in token_to_tag_index]  # ok
+            if xpath_tag_map is not None:
+                xpath_tags_seq = [xpath_tag_map.get(tid, pad_x_tag_seq) for tid in token_to_tag_index]  # ok
+                xpath_subs_seq = [xpath_subs_map.get(tid, pad_x_subs_seq) for tid in token_to_tag_index]  # ok
+                xpath_tags_seq_tag = [xpath_tag_map.get(tid, pad_x_tag_seq) for tid in tag_list]  # ok
+                xpath_subs_seq_tag = [xpath_subs_map.get(tid, pad_x_subs_seq) for tid in tag_list]  # ok
+            else:
+                xpath_tags_seq, xpath_subs_seq, xpath_tags_seq_tag, xpath_subs_seq_tag = None, None, None, None
             answer_tid = label_generating(example.html_tree, answer_tid, app_tags, base)
             features.append(
                 InputFeatures(
@@ -779,6 +788,8 @@ def convert_examples_to_features(examples, tokenizer, loss_method, max_seq_lengt
                     is_impossible=span_is_impossible,
                     xpath_tags_seq=xpath_tags_seq,
                     xpath_subs_seq=xpath_subs_seq,
+                    xpath_tags_seq_tag=xpath_tags_seq_tag,
+                    xpath_subs_seq_tag=xpath_subs_seq_tag,
                 ))
             unique_id += 1
 

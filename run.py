@@ -180,6 +180,11 @@ def train(args, train_dataset, model, tokenizer):
                     'xpath_tags_seq': batch[5],
                     'xpath_subs_seq': batch[6],
                 })
+                if args.add_xpath:
+                    inputs.update({
+                        'xpath_tags_seq_tag': batch[7],
+                        'xpath_subs_seq_tag': batch[8],
+                    })
                 del inputs['token_type_ids']
             if args.model_type == 'roberta':
                 del inputs['token_type_ids']
@@ -299,6 +304,11 @@ def evaluate(args, model, tokenizer, prefix="", write_pred=True):
                     'xpath_tags_seq': batch[5],
                     'xpath_subs_seq': batch[6],
                 })
+                if args.add_xpath:
+                    inputs.update({
+                        'xpath_tags_seq_tag': batch[7],
+                        'xpath_subs_seq_tag': batch[8],
+                    })
                 del inputs['token_type_ids']
             if args.model_type == 'roberta':
                 del inputs['token_type_ids']
@@ -366,7 +376,10 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
     cached_features_file = '{}_{}'.format(base_cached_features_file,
                                           args.loss_method if 'soft' not in args.loss_method
                                           else '{}_{}'.format(args.soft_remain, args.soft_decay))
-    # cached_features_file += 'V'
+    if args.add_xpath:
+        cached_features_file += 'X'
+    cached_features_file = cached_features_file.replace('markuplm_base', 'markuplm').replace('markuplm_large', 'markuplm')
+    cached_features_file = cached_features_file.replace('roberta_base', 'roberta').replace('roberta_large', 'roberta')
 
     if os.path.exists(cached_features_file) and not args.overwrite_cache and not args.enforce:
         logger.info("Loading features from cached file %s", cached_features_file)
@@ -386,6 +399,13 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
             tag_list = list(tag_list)
             tag_list.sort()
             tokenizer.add_tokens(tag_list)
+
+        #!
+        if args.temp:
+            features = [f for f in features if not f.is_impossible]
+            torch.save(features, cached_features_file + 'A')
+            raise SystemError('Mission complete!')
+            pass
     else:
         logger.info("Creating features from dataset file at %s", input_file)
 
@@ -467,7 +487,7 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
     all_segment_ids = torch.tensor([f.segment_ids for f in features], dtype=torch.long)
     all_tag_depth = torch.tensor([f.depth for f in features], dtype=torch.long)
     all_app_tags = [f.app_tags for f in features]
-    all_tag_lists = torch.tensor([f.tag_list for f in features], dtype=torch.long)
+    # all_tag_lists = torch.tensor([f.tag_list for f in features], dtype=torch.long)
     all_example_index = [f.example_index for f in features]
     all_html_trees = [e.html_tree for e in examples]
     all_base_index = [f.base_index for f in features]
@@ -476,13 +496,19 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
     if args.model_type == 'markuplm':
         all_xpath_tags_seq = torch.tensor([f.xpath_tags_seq for f in features], dtype=torch.long)
         all_xpath_subs_seq = torch.tensor([f.xpath_subs_seq for f in features], dtype=torch.long)
+        if args.add_xpath:
+            all_xpath_tags_seq_tag = torch.tensor([f.xpath_tags_seq_tag for f in features], dtype=torch.long)
+            all_xpath_subs_seq_tag = torch.tensor([f.xpath_subs_seq_tag for f in features], dtype=torch.long)
+        else:
+            all_xpath_tags_seq_tag, all_xpath_subs_seq_tag = None, None
     else:
-        all_xpath_tags_seq, all_xpath_subs_seq = None, None
+        all_xpath_tags_seq, all_xpath_subs_seq, all_xpath_tags_seq_tag, all_xpath_subs_seq_tag = None, None, None, None
 
     if evaluate:
         all_feature_index = torch.arange(all_input_ids.size(0), dtype=torch.long)
         dataset = StrucDataset(all_input_ids, all_input_mask, all_segment_ids, all_feature_index, all_tag_depth,
-                               all_xpath_tags_seq, all_xpath_subs_seq, tag_list=all_tag_lists,
+                               all_xpath_tags_seq, all_xpath_subs_seq, all_xpath_tags_seq_tag, all_xpath_subs_seq_tag,
+                               # tag_list=all_tag_lists,
                                gat_mask=(all_app_tags, all_example_index, all_html_trees), base_index=all_base_index,
                                tag2tok=all_tag_to_token, shape=(args.max_tag_length, args.max_seq_length),
                                training=False, page_id=all_page_id, mask_method=args.mask_method,
@@ -493,7 +519,8 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
         all_answer_tid = torch.tensor([f.answer_tid for f in features],
                                       dtype=torch.long if 'base' in args.loss_method else torch.float)
         dataset = StrucDataset(all_input_ids, all_input_mask, all_segment_ids, all_answer_tid, all_tag_depth,
-                               all_xpath_tags_seq, all_xpath_subs_seq, tag_list=all_tag_lists,
+                               all_xpath_tags_seq, all_xpath_subs_seq, all_xpath_tags_seq_tag, all_xpath_subs_seq_tag,
+                               # tag_list=all_tag_lists,
                                gat_mask=(all_app_tags, all_example_index, all_html_trees), base_index=all_base_index,
                                tag2tok=all_tag_to_token, shape=(args.max_tag_length, args.max_seq_length),
                                training=True, page_id=all_page_id, mask_method=args.mask_method,
@@ -640,6 +667,8 @@ def main():
     parser.add_argument('--slice_cache', action='store_true')
     parser.add_argument('--base_lr', default=None, type=float)
     parser.add_argument('--num_workers', default=0, type=int)
+    parser.add_argument('--add_xpath', action='store_true')
+    parser.add_argument('--temp', action='store_true')
     args = parser.parse_args()
 
     if os.path.exists(args.output_dir) and os.listdir(

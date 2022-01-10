@@ -38,7 +38,7 @@ class SubDataset(Dataset):
         all_segment_ids = torch.tensor([f.segment_ids for f in features], dtype=torch.long)
         all_tag_depth = torch.tensor([f.depth for f in features], dtype=torch.long)
         all_app_tags = [f.app_tags for f in features]
-        all_tag_lists = torch.tensor([f.tag_list for f in features], dtype=torch.long)
+        # all_tag_lists = torch.tensor([f.tag_list for f in features], dtype=torch.long)
         all_example_index = [f.example_index for f in features]
         all_base_index = [f.base_index for f in features]
         all_tag_to_token = [f.tag_to_token_index for f in features]
@@ -47,14 +47,20 @@ class SubDataset(Dataset):
         if self.args.model_type == 'markuplm':
             all_xpath_tags_seq = torch.tensor([f.xpath_tags_seq for f in features], dtype=torch.long)
             all_xpath_subs_seq = torch.tensor([f.xpath_subs_seq for f in features], dtype=torch.long)
+            if self.args.add_xpath:
+                all_xpath_tags_seq_tag = torch.tensor([f.xpath_tags_seq_tag for f in features], dtype=torch.long)
+                all_xpath_subs_seq_tag = torch.tensor([f.xpath_subs_seq_tag for f in features], dtype=torch.long)
+            else:
+                all_xpath_tags_seq_tag, all_xpath_subs_seq_tag = None, None
         else:
-            all_xpath_tags_seq, all_xpath_subs_seq = None, None
+            all_xpath_tags_seq, all_xpath_subs_seq, all_xpath_tags_seq_tag, all_xpath_subs_seq_tag = None, None, None, None
 
         if self.evaluate:
             all_feature_index = torch.arange(all_input_ids.size(0), dtype=torch.long)
             self.dataset = StrucDataset(all_input_ids, all_input_mask, all_segment_ids, all_feature_index,
                                         all_tag_depth, all_xpath_tags_seq, all_xpath_subs_seq,
-                                        tag_list=all_tag_lists,
+                                        all_xpath_tags_seq_tag, all_xpath_subs_seq_tag,
+                                        # tag_list=all_tag_lists,
                                         gat_mask=(all_app_tags, all_example_index, self.all_html_trees),
                                         base_index=all_base_index,
                                         tag2tok=all_tag_to_token,
@@ -68,7 +74,8 @@ class SubDataset(Dataset):
                                           dtype=torch.long if self.args.loss_method == 'base' else torch.float)
             self.dataset = StrucDataset(all_input_ids, all_input_mask, all_segment_ids, all_answer_tid, all_tag_depth,
                                         all_xpath_tags_seq, all_xpath_subs_seq,
-                                        tag_list=all_tag_lists,
+                                        all_xpath_tags_seq_tag, all_xpath_subs_seq_tag,
+                                        # tag_list=all_tag_lists,
                                         gat_mask=(all_app_tags, all_example_index, self.all_html_trees),
                                         base_index=all_base_index,
                                         tag2tok=all_tag_to_token,
@@ -352,7 +359,7 @@ class Link(nn.Module):
         if self.cnn_mode == "once":
             self.scaling = nn.Linear(config.hidden_size + config.cnn_feature_dim, config.hidden_size)
 
-    def forward(self, inputs, tag_to_token, tag_depth, cnn_feature=None):
+    def forward(self, inputs, tag_to_token, tag_depth, cnn_feature=None, xpath_embedding=None):
         assert tag_to_token.dim() == 3
         modified_tag2token = self.deduce_direct_string(tag_to_token)
         outputs = torch.matmul(modified_tag2token, inputs)
@@ -363,6 +370,8 @@ class Link(nn.Module):
         if self.add_position_embeddings:
             depth_embeddings = self.depth_embeddings(tag_depth)
             outputs = outputs + depth_embeddings
+        if xpath_embedding is not None:
+            outputs = outputs + xpath_embedding
 
         if self.cnn_mode == "once":
             outputs = torch.cat([outputs, cnn_feature], dim=2)
@@ -493,6 +502,8 @@ class GraphHtmlBert(BertPreTrainedModel):
             visual_feature=None,
             xpath_tags_seq=None,
             xpath_subs_seq=None,
+            xpath_tags_seq_tag=None,
+            xpath_subs_seq_tag=None,
     ):
 
         if self.base_type == 'markuplm':
@@ -520,7 +531,13 @@ class GraphHtmlBert(BertPreTrainedModel):
             sequence_output = outputs[0]
             outputs = outputs[2:]
 
-        gat_inputs = self.link(sequence_output, tag_to_tok, tag_depth, cnn_feature=visual_feature)
+        if xpath_tags_seq_tag is not None :
+            assert xpath_subs_seq_tag is not None
+            xpath_embedding = self.ptm.embeddings.xpath_embeddings(xpath_tags_seq_tag, xpath_subs_seq_tag)
+        else:
+            xpath_embedding = None
+        gat_inputs = self.link(sequence_output, tag_to_tok, tag_depth,
+                               cnn_feature=visual_feature, xpath_embedding=xpath_embedding)
         if self.config.num_attention_heads == 12:
             if self.mask_method == 0:
                 if self.d == 'b':
