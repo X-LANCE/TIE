@@ -8,7 +8,45 @@ from torch.utils.data import Dataset
 from utils import form_tree_mask, form_spatial_mask
 
 
-class SubDataset(Dataset):
+# noinspection PyUnresolvedReferences
+class BaseDataset(Dataset):
+    def _init_spatial_mask(self, mask_dir):
+        if mask_dir is None:
+            self.spatial_mask = None
+            return
+        if isinstance(mask_dir, dict):
+            self.spatial_mask = mask_dir
+            return
+        self.spatial_mask = {}
+        for d, _, fs in os.walk(mask_dir):
+            for f in fs:
+                if not f.endswith('.spatial.json'):
+                    continue
+                domain = d.split('/')[-3][:2]
+                page = f.split('.')[0]
+                self.spatial_mask[domain + page] = json.load(open(os.path.join(d, f)))
+        return
+
+    def _init_cnn_feature(self):
+        if self.cnn_feature_dir is None:
+            self.cnn_feature = None
+            print('None!')
+            return
+        self.cnn_feature = {}
+        cnn_feature_dir = os.walk(self.cnn_feature_dir)
+        for d, _, fs in cnn_feature_dir:
+            for f in fs:
+                if f.split('.')[-1] != 'npy':
+                    continue
+                domain = d.split('/')[-3][:2]
+                page = f.split('.')[0]
+                temp = torch.as_tensor(np.load(os.path.join(d, f)), dtype=torch.float)
+                self.cnn_feature[domain + page] = torch.cat([temp, torch.zeros_like(temp[0]).unsqueeze(0)], dim=0)
+        print(len(self.cnn_feature))
+        return
+
+
+class SubDataset(BaseDataset):
     def __init__(self, examples, evaluate, total, base_name, args):
         self.examples = examples
         self.evaluate = evaluate
@@ -22,6 +60,7 @@ class SubDataset(Dataset):
         self.dataset = None
         self.all_html_trees = [e.html_tree for e in self.examples]
         self._read_data()
+        self._init_spatial_mask(os.path.dirname(self.input_file) if self.args.mask_method < 2 else None)
 
     def _read_data(self):
         del self.dataset
@@ -59,7 +98,7 @@ class SubDataset(Dataset):
                                         tag2tok=all_tag_to_token,
                                         shape=(self.args.max_tag_length, self.args.max_seq_length),
                                         training=False, page_id=all_page_id, mask_method=self.args.mask_method,
-                                        mask_dir=os.path.dirname(self.input_file) if self.args.mask_method < 2 else None,
+                                        mask_dir=self.spatial_mask,
                                         separate=self.args.separate_mask, cnn_feature_dir=self.args.cnn_feature_dir,
                                         direction=self.args.direction)
         else:
@@ -74,7 +113,7 @@ class SubDataset(Dataset):
                                         tag2tok=all_tag_to_token,
                                         shape=(self.args.max_tag_length, self.args.max_seq_length),
                                         training=True, page_id=all_page_id, mask_method=self.args.mask_method,
-                                        mask_dir=os.path.dirname(self.input_file) if self.args.mask_method < 2 else None,
+                                        mask_dir=self.spatial_mask,
                                         separate=self.args.separate_mask, cnn_feature_dir=self.args.cnn_feature_dir,
                                         direction=self.args.direction)
 
@@ -91,41 +130,6 @@ class SubDataset(Dataset):
 
     def __len__(self):
         return self.total
-
-
-# noinspection PyUnresolvedReferences
-class BaseDataset(Dataset):
-    def _init_spatial_mask(self):
-        if self.mask_dir is None:
-            self.spatial_mask = None
-            return
-        self.spatial_mask = {}
-        for d, _, fs in os.walk(self.mask_dir):
-            for f in fs:
-                if not f.endswith('.spatial.json'):
-                    continue
-                domain = d.split('/')[-3][:2]
-                page = f.split('.')[0]
-                self.spatial_mask[domain + page] = json.load(open(os.path.join(d, f)))
-        return
-
-    def _init_cnn_feature(self):
-        if self.cnn_feature_dir is None:
-            self.cnn_feature = None
-            print('None!')
-            return
-        self.cnn_feature = {}
-        cnn_feature_dir = os.walk(self.cnn_feature_dir)
-        for d, _, fs in cnn_feature_dir:
-            for f in fs:
-                if f.split('.')[-1] != 'npy':
-                    continue
-                domain = d.split('/')[-3][:2]
-                page = f.split('.')[0]
-                temp = torch.as_tensor(np.load(os.path.join(d, f)), dtype=torch.float)
-                self.cnn_feature[domain + page] = torch.cat([temp, torch.zeros_like(temp[0]).unsqueeze(0)], dim=0)
-        print(len(self.cnn_feature))
-        return
 
 
 class StrucDataset(BaseDataset):
@@ -150,11 +154,10 @@ class StrucDataset(BaseDataset):
         self.training = training
         self.page_id = page_id
         self.mask_method = mask_method
-        self.mask_dir = mask_dir
         self.direction = direction
         self.separate = separate
         self.cnn_feature_dir = cnn_feature_dir
-        self._init_spatial_mask()
+        self._init_spatial_mask(mask_dir)
         self._init_cnn_feature()
 
     def __getitem__(self, index):
