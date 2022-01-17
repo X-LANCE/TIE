@@ -41,7 +41,8 @@ from transformers import (
 )
 from markuplmft.models.markuplm import MarkupLMConfig, MarkupLMTokenizer, MarkupLMForQuestionAnswering
 
-from model import GraphHtmlConfig, GraphHtmlBert, StrucDataset, SubDataset, SliceDataset
+from model import TIEConfig, TIE
+from dataset import StrucDataset, SubDataset, SliceDataset
 from utils import read_squad_examples, convert_examples_to_features, RawResult, RawTagResult,\
     write_tag_predictions, write_predictions_provided_tag
 from utils_evaluate import EVAL_OPTS, main as evaluate_on_squad
@@ -70,7 +71,7 @@ def train(args, train_dataset, model, tokenizer):
         tb_writer = SummaryWriter()
 
     args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
-    if args.separate_read:
+    if args.separate_read is not None:
         assert args.local_rank == -1
         train_sampler = SequentialSampler(train_dataset)
     else:
@@ -228,8 +229,6 @@ def train(args, train_dataset, model, tokenizer):
                 if args.local_rank in [-1, 0] and args.save_steps > 0 and global_step % args.save_steps == 0:
                     # Save model checkpoint
                     output_dir = os.path.join(args.output_dir, 'checkpoint-{}'.format(global_step))
-                    if not os.path.exists(output_dir):
-                        os.makedirs(output_dir)
                     model_to_save = model.module if hasattr(model, 'module') else model
                     # Take care of distributed/parallel training
                     model_to_save.save_pretrained(output_dir)
@@ -378,8 +377,6 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
                                           else '{}_{}'.format(args.soft_remain, args.soft_decay))
     if args.add_xpath:
         cached_features_file += 'X'
-    if args.temp:
-        cached_features_file += 'T'
     cached_features_file = cached_features_file.replace('markuplm_base', 'markuplm').replace('markuplm_large', 'markuplm')
     cached_features_file = cached_features_file.replace('roberta_base', 'roberta').replace('roberta_large', 'roberta')
 
@@ -387,7 +384,7 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
         logger.info("Loading features from cached file %s", cached_features_file)
         if args.slice_cache:
             offsets = json.load(open(cached_features_file + '_offsets'))
-        elif args.separate_read and not evaluate:
+        elif args.separate_read is not None and not evaluate:
             total = torch.load(cached_features_file + '_total')
             features = None
         else:
@@ -396,14 +393,12 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
                                                  is_training=not evaluate,
                                                  tokenizer=tokenizer,
                                                  base_mode=args.model_type,
-                                                 temp=args.temp,
                                                  simplify=True)
-        if not evaluate and not args.temp:
+        if not evaluate:
             tag_list = list(tag_list)
             tag_list.sort()
             tokenizer.add_tokens(tag_list)
 
-        #!
         # if args.temp:
             # features = [f for f in features if not f.is_impossible]
             # torch.save(features, cached_features_file + 'A')
@@ -412,12 +407,11 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
     else:
         logger.info("Creating features from dataset file at %s", input_file)
 
-        if not evaluate and not args.temp:
+        if not evaluate:
             examples, tag_list = read_squad_examples(input_file=input_file,
                                                      is_training=not evaluate,
                                                      tokenizer=tokenizer,
                                                      base_mode=args.model_type,
-                                                     temp=args.temp,
                                                      simplify=True)
             tag_list = list(tag_list)
             tag_list.sort()
@@ -427,7 +421,6 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
                                           is_training=not evaluate,
                                           tokenizer=tokenizer,
                                           base_mode=args.model_type,
-                                          temp=args.temp,
                                           simplify=False,
                                           sample_size=args.sample_size if args.enforce else None)
 
@@ -452,12 +445,14 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
                 json.dump(offsets, open(cached_features_file + '_offsets', 'w'))
             else:
                 torch.save(features, cached_features_file)
-                if args.separate_read and not evaluate:
+                if args.separate_read is not None and not evaluate:
                     random.shuffle(features)
                     total = len(features)
-                    num = ((total // 2) // 64) * 64
-                    torch.save(features[:num], cached_features_file + '_sub1')
-                    torch.save(features[num:], cached_features_file + '_sub2')
+                    num = ((total // 64) // args.separate_read) * 64
+                    for i in range(args.separate_read - 1):
+                        torch.save(features[i * num:(i + 1) * num], cached_features_file + '_sub_{}'.format(i + 1))
+                    torch.save(features[args.separate_read - 1 * num:], cached_features_file + '_sub_8')
+                    # torch.save(features[num:], cached_features_file + '_sub2')
                     torch.save(total, cached_features_file + '_total')
 
     if args.local_rank == 0 and not evaluate:
@@ -467,9 +462,11 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
     if args.resave:
         random.shuffle(features)
         total = len(features)
-        num = ((total // 2) // 64) * 64
-        torch.save(features[:num], cached_features_file + '_sub1')
-        torch.save(features[num:], cached_features_file + '_sub2')
+        num = ((total // 64) // args.separate_read) * 64
+        for i in range(args.separate_read - 1):
+            torch.save(features[i * num:(i + 1) * num], cached_features_file + '_sub_{}'.format(i + 1))
+        torch.save(features[args.separate_read - 1 * num:], cached_features_file + '_sub_8')
+        # torch.save(features[num:], cached_features_file + '_sub2')
         torch.save(total, cached_features_file + '_total')
         raise SystemError('Mission complete!')
 
@@ -482,8 +479,8 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
                                separate=args.separate_mask, cnn_feature_dir=args.cnn_feature_dir,
                                direction=args.direction, loss_method=args.loss_method)
         return dataset
-    elif args.separate_read and not evaluate:
-        dataset = SubDataset(examples, evaluate, total, cached_features_file, 2, args)
+    elif args.separate_read is not None and not evaluate:
+        dataset = SubDataset(examples, evaluate, total, cached_features_file, args)
         return dataset
 
     # Convert to Tensors and build dataset
@@ -645,17 +642,15 @@ def main():
     parser.add_argument('--sample_size', type=int, default=None)
     parser.add_argument('--max_tag_length', type=int, default=384)
 
-    # Struc_Config parameters
+    # added parameters
     parser.add_argument('--num_node_block', type=int, default=3)
 
-    parser.add_argument('--resume', type=str, default=None,
-                        help='the folder of the checkpoint is provided')
-    parser.add_argument('--separate_read', action='store_true')
+    parser.add_argument('--separate_read', default=None, type=int)
     parser.add_argument('--resave', action='store_true')
     parser.add_argument('--evaluate_split', type=str, default='dev', choices=['dev', 'test', 'train'])
     parser.add_argument('--max_depth_embeddings', type=int, default=None,
                         help='Set to the max depth embedding for node if want to use the position embeddings')
-    parser.add_argument('--loss_method', type=str, default='base', choices=['base', 'soft', 'multi-soft'])
+    parser.add_argument('--loss_method', type=str, default='base', choices=['base', 'soft', 'multi-soft', 'bce-soft', 'bce-calc'])
     parser.add_argument('--soft_remain', type=float, default=0.7)
     parser.add_argument('--soft_decay', type=float, default=0.5)
     parser.add_argument('--separate_mask', action='store_true')
@@ -663,7 +658,6 @@ def main():
     parser.add_argument('--mask_method', type=int, default=1,
                         help='how the GAT implement: 0-DOM+SPA; 1-SPA; 2-DOM; 3-DOM-')
 
-    parser.add_argument('--no_ce', action='store_true')
     parser.add_argument('--cnn_feature_dim', default=0, type=int)
     parser.add_argument('--cnn_feature_dir', default=None, type=str)
     parser.add_argument('--cnn_mode', default="none", choices=["none", "once", "each"])
@@ -674,6 +668,7 @@ def main():
     parser.add_argument('--num_workers', default=0, type=int)
     parser.add_argument('--add_xpath', action='store_true')
     parser.add_argument('--temp', action='store_true')
+    parser.add_argument('--max_rel_position_embeddings', default=None, type=int)
     args = parser.parse_args()
 
     if os.path.exists(args.output_dir) and os.listdir(
@@ -723,18 +718,25 @@ def main():
         tokenizer = MarkupLMTokenizer.from_pretrained(args.tokenizer_name if args.tokenizer_name
                                                       else args.model_name_or_path,
                                                       do_lower_case=args.do_lower_case, cache_dir=args.cache_dir)
-        model = MarkupLMForQuestionAnswering.from_pretrained(args.model_name_or_path,
-                                                             from_tf=bool('.ckpt' in args.model_name_or_path),
-                                                             config=config, cache_dir=args.cache_dir)
     else:
         config = AutoConfig.from_pretrained(args.config_name if args.config_name else args.model_name_or_path,
                                             cache_dir=args.cache_dir)
         tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_name if args.tokenizer_name
                                                   else args.model_name_or_path,
                                                   do_lower_case=args.do_lower_case, cache_dir=args.cache_dir)
-        model = AutoModelForQuestionAnswering.from_pretrained(args.model_name_or_path,
-                                                              from_tf=bool('.ckpt' in args.model_name_or_path),
-                                                              config=config, cache_dir=args.cache_dir)
+    if args.provided_tag_pred is not None:
+        assert not args.do_train
+        if args.model_type == 'markuplm':
+            model = MarkupLMForQuestionAnswering.from_pretrained(args.model_name_or_path,
+                                                                 from_tf=bool('.ckpt' in args.model_name_or_path),
+                                                                 config=config, cache_dir=args.cache_dir)
+        else:
+            model = AutoModelForQuestionAnswering.from_pretrained(args.model_name_or_path,
+                                                                  from_tf=bool('.ckpt' in args.model_name_or_path),
+                                                                  config=config, cache_dir=args.cache_dir)
+    else:
+        tie_config = TIEConfig(args, **config.__dict__)
+        model = TIE(tie_config, init_plm=True)
 
     if args.local_rank == 0:
         torch.distributed.barrier()
@@ -760,52 +762,27 @@ def main():
         if model.config.vocab_size != len(tokenizer):
             model.resize_token_embeddings(len(tokenizer))
         tokenizer.save_pretrained(args.output_dir)
-        html_config = GraphHtmlConfig(args, **config.__dict__)
-        model = GraphHtmlBert(model, html_config, d=args.direction)
-        if args.resume is not None:
-            model.load_state_dict(torch.load(args.resume), strict=False)
         model.to(args.device)
         global_step, tr_loss = train(args, train_dataset, model, tokenizer)
         logger.info(" global_step = %s, average loss = %s", global_step, tr_loss)
 
-    # Save the trained model and the tokenizer
-    if args.do_train and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
-        # Create output directory if needed
-        if not os.path.exists(args.output_dir) and args.local_rank in [-1, 0]:
-            os.makedirs(args.output_dir)
+        # Save the trained model and the tokenizer
+        if args.local_rank == -1 or torch.distributed.get_rank() == 0:
+            # Create output directory if needed
+            output_dir = os.path.join(args.output_dir, 'checkpoint-{}'.format(global_step))
 
-        logger.info("Saving model checkpoint to %s", args.output_dir)
-        # Save a trained model, configuration and tokenizer using `save_pretrained()`.
-        # They can then be reloaded using `from_pretrained()`
-        # Take care of distributed/parallel training
-        model_to_save = model.module if hasattr(model, 'module') else model
-        model_to_save.save_pretrained(args.output_dir)
-        tokenizer.save_pretrained(args.output_dir)
+            logger.info("Saving model checkpoint to %s", output_dir)
+            # Save a trained model, configuration and tokenizer using `save_pretrained()`.
+            # They can then be reloaded using `from_pretrained()`
+            # Take care of distributed/parallel training
+            model_to_save = model.module if hasattr(model, 'module') else model
+            model_to_save.save_pretrained(output_dir)
 
-        # Good practice: save your training arguments together with the trained model
-        torch.save(args, os.path.join(args.output_dir, 'training_args.bin'))
+            # Good practice: save your training arguments together with the trained model
+            torch.save(args, os.path.join(args.output_dir, 'training_args.bin'))
 
     # Evaluation - we can ask to evaluate all the checkpoints (sub-directories) in a directory
     results = {}
-    if args.do_eval and args.do_train:
-        if args.model_type == 'markuplm':
-            config = MarkupLMConfig.from_pretrained(args.config_name if args.config_name else args.model_name_or_path,
-                                                    cache_dir=args.cache_dir)
-            tokenizer = MarkupLMTokenizer.from_pretrained(args.tokenizer_name if args.tokenizer_name
-                                                          else args.model_name_or_path,
-                                                          do_lower_case=args.do_lower_case, cache_dir=args.cache_dir)
-            model = MarkupLMForQuestionAnswering.from_pretrained(args.model_name_or_path,
-                                                                 from_tf=bool('.ckpt' in args.model_name_or_path),
-                                                                 config=config, cache_dir=args.cache_dir)
-        else:
-            config = AutoConfig.from_pretrained(args.config_name if args.config_name else args.model_name_or_path,
-                                                cache_dir=args.cache_dir)
-            tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_name if args.tokenizer_name
-                                                      else args.model_name_or_path,
-                                                      do_lower_case=args.do_lower_case, cache_dir=args.cache_dir)
-            model = AutoModelForQuestionAnswering.from_pretrained(args.model_name_or_path,
-                                                                  from_tf=bool('.ckpt' in args.model_name_or_path),
-                                                                  config=config, cache_dir=args.cache_dir)
     if args.do_eval and args.local_rank in [-1, 0]:
         if args.provided_tag_pred is not None:
             logger.info("Evaluate the PLM provided with tags: %s", args.model_name_or_path)
@@ -813,11 +790,12 @@ def main():
             result = evaluate(args, model, tokenizer)
             results.update(result)
         else:
-            checkpoints = [args.output_dir]
             if args.eval_all_checkpoints:
                 checkpoints = list(
                     os.path.dirname(c) for c in sorted(glob.glob(args.output_dir + '/**/' + WEIGHTS_NAME, recursive=True)))
                 logging.getLogger("transformers.modeling_utils").setLevel(logging.WARN)  # Reduce model loading logs
+            else:
+                checkpoints = [args.output_dir]
     
             logger.info("Evaluate the following checkpoints: %s", checkpoints)
 
@@ -843,13 +821,12 @@ def main():
                     continue
                 if global_step and args.eval_to_checkpoint and int(global_step) >= args.eval_to_checkpoint:
                     continue
-                html_config = GraphHtmlConfig(args, **config.__dict__)
-                eval_model = GraphHtmlBert(model, html_config, d=args.direction)
-                eval_model.load_state_dict(torch.load(os.path.join(checkpoint, 'pytorch_model.bin')))
-                eval_model.to(args.device)
+                tie_config = TIEConfig.from_pretrained(checkpoint)
+                model.from_pretrained(checkpoint, config=tie_config)
+                model.to(args.device)
 
                 # Evaluate
-                result = evaluate(args, eval_model, tokenizer, prefix=global_step)
+                result = evaluate(args, model, tokenizer, prefix=global_step)
 
                 result = dict((k + ('_{}'.format(global_step) if global_step else ''), v) for k, v in result.items())
                 results.update(result)

@@ -13,3 +13,5 @@ backup
 backup/*
 tools
 tools/*
+temp/
+temp/*
