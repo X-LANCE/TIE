@@ -292,10 +292,7 @@ def read_squad_examples(input_file, is_training, tokenizer, base_mode, max_depth
             if type(element) == bs4.element.NavigableString and element.strip():
                 t_id += 1
             if type(element) == bs4.element.Tag:
-                if int(element.attrs['tid']) == e_id:
-                    break
-                elif int(element.attrs['tid']) > e_id:
-                    t_id -= 1
+                if int(element.attrs['tid']) >= e_id:
                     break
         return t_id
 
