@@ -242,7 +242,7 @@ class TIEConfig(PretrainedConfig):
             self.cnn_feature_dim = args.cnn_feature_dim
             self.cnn_mode = args.cnn_mode
             self.max_rel_position_embeddings = args.max_rel_position_embeddings
-            self.direction = args.directrion
+            self.direction = args.direction
             if args.mask_method == 4:
                 self.position_embedding_type = 'separated'
             elif args.mask_method == 5:
