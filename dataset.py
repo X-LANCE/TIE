@@ -63,8 +63,8 @@ class SubDataset(_BaseDataset):
         self.passed_index = 0
         self.dataset = None
         self.all_html_trees = [e.html_tree for e in self.examples]
-        self._read_data()
         self._init_spatial_mask(os.path.dirname(self.input_file), self.args.mask_method)
+        self._read_data()
 
     def _read_data(self):
         del self.dataset
