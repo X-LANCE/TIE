@@ -2,6 +2,8 @@ import argparse
 import json
 import os
 
+import bs4.element
+import numpy as np
 from tqdm import tqdm
 from bs4 import element, BeautifulSoup as bs
 
@@ -118,10 +120,95 @@ def mask_process(args):
         print('Successfully finish dir:', d)
 
 
+def advanced_mask(args):
+    """
+    0 - no relation
+    1 - self loop
+    2 - descendant
+    3 - ancestor
+    4 - up
+    5 - down
+    6 - left
+    7 - right
+    8 - crossing
+    """
+    print('Start advanced process!!!')
+    except_domain = ['sports']
+    for d, _, fs in os.walk(args.root_dir):
+        if (d.split('/') + [''])[1] in except_domain:
+            continue
+        print('Start process dir:', d)
+        for f in tqdm(fs):
+            if not f.endswith('.html'):
+                continue
+            page_id = f.split('.')[0]
+            html = bs(open(os.path.join(d, f)))
+            rect = json.load(open(os.path.join(d, page_id + '.json')))
+            max_tid = max([int(k) for k in rect]) + 1
+            mask = np.zeros((max_tid, max_tid), dtype=np.int8)
+            ind = np.diag_indices_from(mask)
+            mask[:, 0:2] = 3
+            mask[0:2, :] = 2
+            mask[ind] = 1
+            tags_cache = {}
+            for tag in html.descendants:
+                if isinstance(tag, bs4.element.Tag):
+                    tags_cache[tag['tid']] = tag
+                    if tag['tid'] not in rect:
+                        rect[tag['tid']] = {'rect': {'x': 0.0, 'y': 0.0, 'width': 0.0, 'height': 0.0}}
+            for i in range(2, max_tid):
+                source = tags_cache[str(i)]
+                source_rect = rect[str(i)]['rect']
+                for j in range(2, max_tid):
+                    target = tags_cache[str(j)]
+                    if mask[i, j] != 0:
+                        continue
+                    if target in source.descendants:
+                        mask[i, j] = 2
+                        mask[j, i] = 3
+                        continue
+                    target_rect = rect[str(j)]['rect']
+                    if min(source_rect['width'], source_rect['height'],
+                           target_rect['width'], target_rect['height']) == 0.0:
+                        continue
+                    overlap_x = min(source_rect['x'] + source_rect['width'],
+                                    target_rect['x'] + target_rect['width']) - max(source_rect['x'], target_rect['x'])
+                    overlap_y = min(source_rect['y'] + source_rect['height'],
+                                    target_rect['y'] + target_rect['height']) - max(source_rect['y'], target_rect['y'])
+                    overlap_x = overlap_x / min(source_rect['width'], target_rect['width'])
+                    overlap_y = overlap_y / min(source_rect['height'], target_rect['height'])
+                    if overlap_y >= args.percentage:
+                        if target_rect['y'] < source_rect['y'] or \
+                                target_rect['y'] + target_rect['height'] < source_rect['y'] + source_rect['height']:
+                            mask[i, j] = 4
+                        if target_rect['y'] > source_rect['y'] or \
+                                target_rect['y'] + target_rect['height'] > source_rect['y'] + source_rect['height']:
+                            if mask[i, j] != 0:
+                                mask[i, j] = 8
+                                continue
+                            mask[i, j] = 5
+                    if overlap_x >= args.percentage:
+                        if target_rect['x'] < source_rect['x'] or \
+                                target_rect['x'] + target_rect['width'] < source_rect['x'] + source_rect['width']:
+                            if mask[i, j] != 0:
+                                mask[i, j] = 8
+                                continue
+                            mask[i, j] = 6
+                        if target_rect['x'] > source_rect['x'] or \
+                                target_rect['x'] + target_rect['width'] > source_rect['x'] + source_rect['width']:
+                            if mask[i, j] != 0:
+                                mask[i, j] = 8
+                                continue
+                            mask[i, j] = 7
+            with open(os.path.join(d, page_id + '.advanced.json'), 'w') as o:
+                json.dump(mask.tolist(), o)
+        print('Successfully finish dir:', d)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--root_dir', required=True, type=str)
-    parser.add_argument('--task', required=True, choices=['rect', 'mask', 'rect_mask'])
+    parser.add_argument('--task', required=True, choices=['rect', 'mask', 'rect_mask', 'advanced'])
     parser.add_argument('--percentage', default=0.5, type=float)
     args = parser.parse_args()
 
@@ -129,6 +216,8 @@ def main():
         rect_process(args)
     if 'mask' in args.task:
         mask_process(args)
+    if args.task == 'advanced':
+        advanced_mask(args)
 
 
 if __name__ == '__main__':
