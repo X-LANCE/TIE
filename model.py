@@ -243,6 +243,7 @@ class TIEConfig(PretrainedConfig):
             self.cnn_mode = args.cnn_mode
             self.max_rel_position_embeddings = args.max_rel_position_embeddings
             self.direction = args.direction
+            self.name_or_path = args.model_name_or_path
             if args.mask_method == 4:
                 self.position_embedding_type = 'separated'
             elif args.mask_method == 5:
@@ -320,6 +321,7 @@ class TIE(BertPreTrainedModel):
 
         if init_plm:
             if self.base_type == 'markuplm':
+                print('!!!', config.name_or_path)
                 self.ptm = MarkupLMForQuestionAnswering.from_pretrained(config.name_or_path, config=config)
             else:
                 self.ptm = AutoModelForQuestionAnswering.from_pretrained(config.name_or_path, config=config)
