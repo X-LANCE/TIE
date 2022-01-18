@@ -9,15 +9,22 @@ from utils import form_tree_mask, form_spatial_mask
 
 
 # noinspection PyUnresolvedReferences
-class BaseDataset(Dataset):
-    def _init_spatial_mask(self, mask_dir):
+class _BaseDataset(Dataset):
+    def _init_spatial_mask(self, mask_dir, method):
+        if method < 2:
+            suffix = '.spatial.json'
+        elif method > 3:
+            suffix = '.advanced.json'
+        else:
+            self.spatial_mask = None
+            return
         if isinstance(mask_dir, dict):
             self.spatial_mask = mask_dir
             return
         self.spatial_mask = {}
         for d, _, fs in os.walk(mask_dir):
             for f in fs:
-                if not f.endswith('.spatial.json'):
+                if not f.endswith(suffix):
                     continue
                 domain = d.split('/')[-3][:2]
                 page = f.split('.')[0]
@@ -43,7 +50,7 @@ class BaseDataset(Dataset):
         return
 
 
-class SubDataset(BaseDataset):
+class SubDataset(_BaseDataset):
     def __init__(self, examples, evaluate, total, base_name, args):
         self.examples = examples
         self.evaluate = evaluate
@@ -57,10 +64,7 @@ class SubDataset(BaseDataset):
         self.dataset = None
         self.all_html_trees = [e.html_tree for e in self.examples]
         self._read_data()
-        if self.args.mask_method < 2 or self.args.mask_method > 3:
-            self._init_spatial_mask(os.path.dirname(self.input_file))
-        else:
-            self.spatial_mask = None
+        self._init_spatial_mask(os.path.dirname(self.input_file), self.args.mask_method)
 
     def _read_data(self):
         del self.dataset
@@ -132,7 +136,7 @@ class SubDataset(BaseDataset):
         return self.total
 
 
-class StrucDataset(BaseDataset):
+class StrucDataset(_BaseDataset):
     """Dataset wrapping tensors.
 
     Each sample will be retrieved by indexing tensors along the first dimension.
@@ -157,10 +161,7 @@ class StrucDataset(BaseDataset):
         self.direction = direction
         self.separate = separate
         self.cnn_feature_dir = cnn_feature_dir
-        if self.mask_method < 2 or self.mask_method > 3:
-            self._init_spatial_mask(mask_dir)
-        else:
-            self.spatial_mask = None
+        self._init_spatial_mask(mask_dir, self.mask_method)
         self._init_cnn_feature()
 
     def __getitem__(self, index):
@@ -243,7 +244,7 @@ class StrucDataset(BaseDataset):
         return len(self.tensors[0])
 
 
-class SliceDataset(BaseDataset):
+class SliceDataset(_BaseDataset):
     def __init__(self, file, offsets, html_trees=None, shape=None, training=True, mask_method=1, mask_dir=None,
                  direction=None, separate=False, cnn_feature_dir=None, loss_method='multi-soft'):
         self.file = open(file)
@@ -257,10 +258,7 @@ class SliceDataset(BaseDataset):
         self.separate = separate
         self.cnn_feature_dir = cnn_feature_dir
         self.loss_method = loss_method
-        if self.mask_method < 2 or self.mask_method > 3:
-            self._init_spatial_mask(self.mask_dir)
-        else:
-            self.spatial_mask = None
+        self._init_spatial_mask(self.mask_dir, self.mask_method)
         self._init_cnn_feature()
         if self.training:
             self.tensor_keys = ['input_ids', 'input_mask', 'segment_ids', 'answer_tid',
