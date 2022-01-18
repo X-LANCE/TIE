@@ -11,9 +11,6 @@ from utils import form_tree_mask, form_spatial_mask
 # noinspection PyUnresolvedReferences
 class BaseDataset(Dataset):
     def _init_spatial_mask(self, mask_dir):
-        if mask_dir is None:
-            self.spatial_mask = None
-            return
         if isinstance(mask_dir, dict):
             self.spatial_mask = mask_dir
             return
@@ -60,7 +57,10 @@ class SubDataset(BaseDataset):
         self.dataset = None
         self.all_html_trees = [e.html_tree for e in self.examples]
         self._read_data()
-        self._init_spatial_mask(os.path.dirname(self.input_file) if self.args.mask_method < 2 else None)
+        if self.args.mask_method < 2 or self.args.mask_method > 3:
+            self._init_spatial_mask(os.path.dirname(self.input_file))
+        else:
+            self.spatial_mask = None
 
     def _read_data(self):
         del self.dataset
@@ -157,7 +157,10 @@ class StrucDataset(BaseDataset):
         self.direction = direction
         self.separate = separate
         self.cnn_feature_dir = cnn_feature_dir
-        self._init_spatial_mask(mask_dir)
+        if self.mask_method < 2 or self.mask_method > 3:
+            self._init_spatial_mask(mask_dir)
+        else:
+            self.spatial_mask = None
         self._init_cnn_feature()
 
     def __getitem__(self, index):
@@ -180,7 +183,7 @@ class StrucDataset(BaseDataset):
             cnn_feature = torch.gather(raw_cnn_feature, 0, ind)
             output.append(cnn_feature)
 
-        if self.spatial_mask is not None and self.mask_method < 2:
+        if self.mask_method < 2:
             if self.direction == 'b':
                 spa_mask = torch.zeros((4, self.shape[0], self.shape[0]), dtype=torch.long)
             else:
@@ -191,25 +194,41 @@ class StrucDataset(BaseDataset):
             spa_mask[:, base:base + len(app_tags), base:base + len(app_tags)] = torch.tensor(temp)
             output.append(spa_mask)
 
-        gat_mask = torch.zeros((1, self.shape[0], self.shape[0]), dtype=torch.long)
-        gat_mask[:, :base, :base + len(app_tags) + 1] = 1
-        gat_mask[:, base + len(app_tags), :base + len(app_tags) + 1] = 1
-        temp = torch.tensor(form_tree_mask(app_tags, html_tree, separate=self.separate,
-                                           accelerate=self.mask_method != 3))
-        if self.separate:  # TODO multiple mask and variable total head number implementation
-            gat_mask = gat_mask.repeat(2, 1, 1)
-            gat_mask[:, base:base + len(app_tags), base:base + len(app_tags)] = torch.tensor(temp[0:2])
-            tree_children = torch.tensor(temp[2])
+        if self.mask_method > 3:
+            spa_mask = np.zeros((self.shape[0], self.shape[0]), dtype=np.int8)
+            spa_mask[:base, base:base + len(app_tags) + 1] = 9
+            spa_mask[base + len(app_tags), base:base + len(app_tags) + 1] = 9
+            spa_mask[base:base + len(app_tags) + 1, :base] = 10
+            spa_mask[:base, :base] = 11
+            spa_mask[:base, base + len(app_tags)] = 11
+            spa_mask[base + len(app_tags), :base] = 11
+            ind = np.diag_indices_from(spa_mask)
+            spa_mask[ind] = 1
+            spa_mask[base:base + len(app_tags), base:base + len(app_tags)] = self.spatial_mask[app_tags][:, app_tags]
+            output.append(spa_mask)
+            gat_mask = torch.zeros((self.shape[0], self.shape[0]), dtype=torch.long)
+            gat_mask[:base + len(app_tags) + 1, :base + len(app_tags) + 1] = 1
+            output.append(spa_mask)
         else:
-            gat_mask[:, base:base + len(app_tags), base:base + len(app_tags)] = torch.tensor(temp[0])
-            tree_children = torch.tensor(temp[1])
-        output.append(gat_mask)
+            gat_mask = torch.zeros((1, self.shape[0], self.shape[0]), dtype=torch.long)
+            gat_mask[:, :base, :base + len(app_tags) + 1] = 1
+            gat_mask[:, base + len(app_tags), :base + len(app_tags) + 1] = 1
+            temp = torch.tensor(form_tree_mask(app_tags, html_tree, separate=self.separate,
+                                               accelerate=self.mask_method != 3))
+            if self.separate:  # TODO multiple mask and variable total head number implementation
+                gat_mask = gat_mask.repeat(2, 1, 1)
+                gat_mask[:, base:base + len(app_tags), base:base + len(app_tags)] = torch.tensor(temp[0:2])
+                # tree_children = torch.tensor(temp[2])
+            else:
+                gat_mask[:, base:base + len(app_tags), base:base + len(app_tags)] = torch.tensor(temp[0])
+                # tree_children = torch.tensor(temp[1])
+            output.append(gat_mask)
 
-        children = torch.zeros((self.shape[0], self.shape[0]), dtype=torch.long)
-        tree_children[tree_children.sum(dim=1) == 0, 0] = 1
-        children[base:base + len(app_tags), base:base + len(app_tags)] = tree_children
-        children[base, 0] = 1
-        output.append(children)
+        # children = torch.zeros((self.shape[0], self.shape[0]), dtype=torch.long)
+        # tree_children[tree_children.sum(dim=1) == 0, 0] = 1
+        # children[base:base + len(app_tags), base:base + len(app_tags)] = tree_children
+        # children[base, 0] = 1
+        # output.append(children)
 
         pooling_matrix = np.zeros(self.shape, dtype=np.double)
         for i in range(len(tag_to_token_index)):
@@ -238,7 +257,10 @@ class SliceDataset(BaseDataset):
         self.separate = separate
         self.cnn_feature_dir = cnn_feature_dir
         self.loss_method = loss_method
-        self._init_spatial_mask()
+        if self.mask_method < 2 or self.mask_method > 3:
+            self._init_spatial_mask(self.mask_dir)
+        else:
+            self.spatial_mask = None
         self._init_cnn_feature()
         if self.training:
             self.tensor_keys = ['input_ids', 'input_mask', 'segment_ids', 'answer_tid',
@@ -279,7 +301,7 @@ class SliceDataset(BaseDataset):
             cnn_feature = torch.gather(raw_cnn_feature, 0, ind)
             output.append(cnn_feature)
 
-        if self.spatial_mask is not None and self.mask_method < 2:
+        if self.mask_method < 2:
             if self.direction == 'b':
                 spa_mask = torch.zeros((4, self.shape[0], self.shape[0]), dtype=torch.long)
             else:

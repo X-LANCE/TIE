@@ -170,12 +170,12 @@ def train(args, train_dataset, model, tokenizer):
                       'token_type_ids' : batch[2],
                       'answer_tid'     : batch[3],
                       'tag_depth'      : batch[4],
-                      'gat_mask'       : batch[-3],
+                      'gat_mask'       : batch[-2],
                       'tag_to_tok'     : batch[-1]}
-            if args.mask_method < 2:
-                inputs.update({'spa_mask' : batch[-4]})
+            if args.mask_method < 2 or args.mask_method > 3:
+                inputs.update({'spa_mask' : batch[-3]})
                 if args.cnn_feature_dir is not None:
-                    inputs.update({'visual_feature': batch[-5]})
+                    inputs.update({'visual_feature': batch[-4]})
             if args.model_type == 'markuplm':
                 inputs.update({
                     'xpath_tags_seq': batch[5],
@@ -292,12 +292,12 @@ def evaluate(args, model, tokenizer, prefix="", write_pred=True):
                           'attention_mask' : batch[1],
                           'token_type_ids' : batch[2],
                           'tag_depth'      : batch[4],
-                          'gat_mask'       : batch[-3],
+                          'gat_mask'       : batch[-2],
                           'tag_to_tok'     : batch[-1]}
-                if args.mask_method < 2:
-                    inputs.update({'spa_mask': batch[-4]})
+                if args.mask_method < 2 or args.mask_method > 3:
+                    inputs.update({'spa_mask': batch[-3]})
                     if args.cnn_feature_dir is not None:
-                        inputs.update({'visual_feature': batch[-5]})
+                        inputs.update({'visual_feature': batch[-4]})
             if args.model_type == 'markuplm':
                 inputs.update({
                     'xpath_tags_seq': batch[5],
@@ -477,7 +477,7 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
         dataset = SliceDataset(file=cached_features_file, offsets=offsets, html_trees=all_html_trees,
                                shape=(args.max_tag_length, args.max_seq_length),
                                training=True, mask_method=args.mask_method,
-                               mask_dir=os.path.dirname(input_file) if args.mask_method < 2 else None,
+                               mask_dir=os.path.dirname(input_file),
                                separate=args.separate_mask, cnn_feature_dir=args.cnn_feature_dir,
                                direction=args.direction, loss_method=args.loss_method)
         return dataset
@@ -516,7 +516,7 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
                                gat_mask=(all_app_tags, all_example_index, all_html_trees), base_index=all_base_index,
                                tag2tok=all_tag_to_token, shape=(args.max_tag_length, args.max_seq_length),
                                training=False, page_id=all_page_id, mask_method=args.mask_method,
-                               mask_dir=os.path.dirname(input_file) if args.mask_method < 2 else None,
+                               mask_dir=os.path.dirname(input_file),
                                separate=args.separate_mask, cnn_feature_dir=args.cnn_feature_dir,
                                direction=args.direction)
     else:
@@ -528,7 +528,7 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
                                gat_mask=(all_app_tags, all_example_index, all_html_trees), base_index=all_base_index,
                                tag2tok=all_tag_to_token, shape=(args.max_tag_length, args.max_seq_length),
                                training=True, page_id=all_page_id, mask_method=args.mask_method,
-                               mask_dir=os.path.dirname(input_file) if args.mask_method < 2 else None,
+                               mask_dir=os.path.dirname(input_file),
                                separate=args.separate_mask, cnn_feature_dir=args.cnn_feature_dir,
                                direction=args.direction)
 
@@ -658,7 +658,7 @@ def main():
     parser.add_argument('--separate_mask', action='store_true')
     parser.add_argument('--provided_tag_pred', type=str, default=None)
     parser.add_argument('--mask_method', type=int, default=1,
-                        help='how the GAT implement: 0-DOM+SPA; 1-SPA; 2-DOM; 3-DOM-')
+                        help='how the GAT implement: 0-DOM+SPA; 1-SPA; 2-DOM; 3-DOM-; 4-DOM+SEP; 5-DOM+SHA')
 
     parser.add_argument('--cnn_feature_dim', default=0, type=int)
     parser.add_argument('--cnn_feature_dir', default=None, type=str)
@@ -670,7 +670,7 @@ def main():
     parser.add_argument('--num_workers', default=0, type=int)
     parser.add_argument('--add_xpath', action='store_true')
     parser.add_argument('--temp', action='store_true')
-    parser.add_argument('--max_rel_position_embeddings', default=None, type=int)
+    parser.add_argument('--max_rel_position_embeddings', default=12, type=int)
     parser.add_argument('--simplify', action='store_true')
     parser.add_argument('--all_positive', action='store_true')
     args = parser.parse_args()

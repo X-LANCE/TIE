@@ -4,9 +4,10 @@ import math
 
 import torch
 import torch.nn as nn
+from transformers.modeling_outputs import BaseModelOutputWithPastAndCrossAttentions
 from transformers.models.bert.modeling_bert import BertEncoder, BertPreTrainedModel, BertSelfAttention, BertAttention, \
     BertLayer, BertSelfOutput, BertIntermediate, BertOutput
-from transformers import PretrainedConfig, AutoModelForQuestionAnswering
+from transformers import PretrainedConfig, AutoModelForQuestionAnswering, apply_chunking_to_forward
 
 from markuplmft import MarkupLMForQuestionAnswering
 
@@ -14,7 +15,7 @@ from markuplmft import MarkupLMForQuestionAnswering
 class TIESelfAttention(BertSelfAttention):
     def __init__(self, config):
         super(TIESelfAttention, self).__init__(config)
-        if self.position_embedding_type == "relation":
+        if self.position_embedding_type == "separated":
             self.max_position_embeddings = config.max_position_embeddings
             self.distance_embedding = nn.Embedding(config.max_rel_position_embeddings, self.attention_head_size)
 
@@ -27,6 +28,7 @@ class TIESelfAttention(BertSelfAttention):
         encoder_attention_mask=None,
         past_key_value=None,
         output_attentions=False,
+        rel_mask=None,
     ):
 
         query_layer = self.transpose_for_scores(self.query(hidden_states))
@@ -36,12 +38,16 @@ class TIESelfAttention(BertSelfAttention):
         # Take the dot product between "query" and "key" to get the raw attention scores.
         attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
 
-        if self.position_embedding_type == "relation":
-            positional_embedding = self.distance_embedding(attention_mask)
+        if self.position_embedding_type == "separated":
+            positional_embedding = self.distance_embedding(rel_mask)
             positional_embedding = positional_embedding.to(dtype=query_layer.dtype)  # fp16 compatibility
-            relative_position_scores = torch.einsum("bhld,lrd->bhlr", query_layer, positional_embedding)
+            relative_position_scores = torch.einsum("bhld,blrd->bhlr", query_layer, positional_embedding)
             attention_scores = attention_scores + relative_position_scores
-        elif attention_mask is not None:
+        elif self.position_embedding_type == "shared":
+            relative_position_scores = torch.einsum("bhld,blrd->bhlr", query_layer, rel_mask)
+            attention_scores = attention_scores + relative_position_scores
+
+        if attention_mask is not None:
             attention_scores = attention_scores + attention_mask
 
         attention_scores = attention_scores / math.sqrt(self.attention_head_size)
@@ -75,6 +81,31 @@ class TIEAttention(BertAttention):
         self.output = BertSelfOutput(config)
         self.pruned_heads = set()
 
+    def forward(
+        self,
+        hidden_states,
+        attention_mask=None,
+        head_mask=None,
+        encoder_hidden_states=None,
+        encoder_attention_mask=None,
+        past_key_value=None,
+        output_attentions=False,
+        rel_mask=None,
+    ):
+        self_outputs = self.self(
+            hidden_states,
+            attention_mask,
+            head_mask,
+            encoder_hidden_states,
+            encoder_attention_mask,
+            past_key_value,
+            output_attentions,
+            rel_mask,
+        )
+        attention_output = self.output(self_outputs[0], hidden_states)
+        outputs = (attention_output,) + self_outputs[1:]  # add attentions if we output them
+        return outputs
+
 
 class TIELayer(BertLayer):
     def __init__(self, config):
@@ -87,6 +118,37 @@ class TIELayer(BertLayer):
         self.intermediate = BertIntermediate(config)
         self.output = BertOutput(config)
 
+    def forward(
+        self,
+        hidden_states,
+        attention_mask=None,
+        head_mask=None,
+        encoder_hidden_states=None,
+        encoder_attention_mask=None,
+        past_key_value=None,
+        output_attentions=False,
+        rel_mask=None,
+    ):
+        # decoder uni-directional self-attention cached key/values tuple is at positions 1,2
+        self_attn_past_key_value = past_key_value[:2] if past_key_value is not None else None
+        self_attention_outputs = self.attention(
+            hidden_states,
+            attention_mask,
+            head_mask,
+            output_attentions=output_attentions,
+            past_key_value=self_attn_past_key_value,
+            rel_mask=rel_mask,
+        )
+        attention_output = self_attention_outputs[0]
+        outputs = self_attention_outputs[1:]  # add self attentions if we output attention weights
+
+        layer_output = apply_chunking_to_forward(
+            self.feed_forward_chunk, self.chunk_size_feed_forward, self.seq_len_dim, attention_output
+        )
+        outputs = (layer_output,) + outputs
+
+        return outputs
+
 
 class TIEEncoder(BertEncoder):
     def __init__(self, config):
@@ -94,6 +156,74 @@ class TIEEncoder(BertEncoder):
         self.config = config
         self.layer = nn.ModuleList([TIELayer(config) for _ in range(config.num_gat_layers)])
         self.gradient_checkpointing = False
+
+    def forward(
+        self,
+        hidden_states,
+        attention_mask=None,
+        head_mask=None,
+        encoder_hidden_states=None,
+        encoder_attention_mask=None,
+        past_key_values=None,
+        use_cache=None,
+        output_attentions=False,
+        output_hidden_states=False,
+        return_dict=True,
+        rel_mask=None,
+    ):
+        all_hidden_states = () if output_hidden_states else None
+        all_self_attentions = () if output_attentions else None
+        all_cross_attentions = () if output_attentions and self.config.add_cross_attention else None
+
+        next_decoder_cache = () if use_cache else None
+        for i, layer_module in enumerate(self.layer):
+            if output_hidden_states:
+                all_hidden_states = all_hidden_states + (hidden_states,)
+
+            layer_head_mask = head_mask[i] if head_mask is not None else None
+            past_key_value = past_key_values[i] if past_key_values is not None else None
+
+            layer_outputs = layer_module(
+                hidden_states,
+                attention_mask,
+                layer_head_mask,
+                encoder_hidden_states,
+                encoder_attention_mask,
+                past_key_value,
+                output_attentions,
+                rel_mask,
+            )
+
+            hidden_states = layer_outputs[0]
+            if use_cache:
+                next_decoder_cache += (layer_outputs[-1],)
+            if output_attentions:
+                all_self_attentions = all_self_attentions + (layer_outputs[1],)
+                if self.config.add_cross_attention:
+                    all_cross_attentions = all_cross_attentions + (layer_outputs[2],)
+
+        if output_hidden_states:
+            all_hidden_states = all_hidden_states + (hidden_states,)
+
+        if not return_dict:
+            return tuple(
+                v
+                for v in [
+                    hidden_states,
+                    next_decoder_cache,
+                    all_hidden_states,
+                    all_self_attentions,
+                    all_cross_attentions,
+                ]
+                if v is not None
+            )
+        return BaseModelOutputWithPastAndCrossAttentions(
+            last_hidden_state=hidden_states,
+            past_key_values=next_decoder_cache,
+            hidden_states=all_hidden_states,
+            attentions=all_self_attentions,
+            cross_attentions=all_cross_attentions,
+        )
 
 
 class TIEConfig(PretrainedConfig):
@@ -113,6 +243,12 @@ class TIEConfig(PretrainedConfig):
             self.cnn_mode = args.cnn_mode
             self.max_rel_position_embeddings = args.max_rel_position_embeddings
             self.direction = args.directrion
+            if args.mask_method == 4:
+                self.position_embedding_type = 'separated'
+            elif args.mask_method == 5:
+                self.position_embedding_type = 'shared'
+            else:
+                self.position_embedding_type = 'absolute'
 
 
 class HTMLBasedPooling(nn.Module):
@@ -180,6 +316,7 @@ class TIE(BertPreTrainedModel):
         self.mask_method = config.mask_method
         self.cnn_mode = config.cnn_mode
         self.direction = config.direction
+        self.position_embedding_type = config.position_embedding_type
 
         if init_plm:
             if self.base_type == 'markuplm':
@@ -197,8 +334,13 @@ class TIE(BertPreTrainedModel):
         # if self.cnn_mode == 'each':
         #     self.gat = VEncoder(config)
         # else:
-        self.gat = BertEncoder(config)
+        self.gat = TIEEncoder(config)
         self.gat_outputs = nn.Linear(config.hidden_size, 1)
+
+        if self.position_embedding_type == "shared":
+            self.max_position_embeddings = config.max_position_embeddings
+            self.distance_embedding = nn.Embedding(config.max_rel_position_embeddings,
+                                                   int(config.hidden_size / config.num_attention_heads))
 
     def forward(
             self,
@@ -252,45 +394,55 @@ class TIE(BertPreTrainedModel):
             xpath_embedding = None
         gat_inputs = self.link(sequence_output, tag_to_tok, tag_depth,
                                cnn_feature=visual_feature, xpath_embedding=xpath_embedding)
-        if self.config.num_attention_heads == 12:
-            if self.mask_method == 0:
-                if self.direction == 'b':
-                    spa_mask = spa_mask.repeat(1, 2, 1, 1)
-                else:
-                    spa_mask = spa_mask.repeat(1, 4, 1, 1)
-                if gat_mask.size(1) == 1:
-                    gat_mask = gat_mask.repeat(1, 4, 1, 1)
-                else:
-                    gat_mask = gat_mask.repeat(1, 2, 1, 1)
-                gat_mask = torch.cat([gat_mask, spa_mask], dim=1)
-            elif self.mask_method == 1:
-                gat_mask = spa_mask.repeat(1, 3, 1, 1)
-            elif gat_mask.size(1) != 1:
-                gat_mask = gat_mask.repeat(1, 6, 1, 1)
-        elif self.config.num_attention_heads == 16:
-            if self.mask_method == 0:
-                if self.direction == 'b':
-                    spa_mask = spa_mask.repeat(1, 3, 1, 1)
-                else:
-                    spa_mask = spa_mask.repeat(1, 6, 1, 1)
-                if gat_mask.size(1) == 1:
-                    gat_mask = gat_mask.repeat(1, 4, 1, 1)
-                else:
-                    gat_mask = gat_mask.repeat(1, 2, 1, 1)
-                gat_mask = torch.cat([gat_mask, spa_mask], dim=1)
-            elif self.mask_method == 1:
-                gat_mask = spa_mask.repeat(1, 4, 1, 1)
-            elif gat_mask.size(1) != 1:
-                gat_mask = gat_mask.repeat(1, 8, 1, 1)
+
+        if self.position_embedding_type == 'absolute':
+            rel_mask = None
+            if self.config.num_attention_heads == 12:
+                if self.mask_method == 0:
+                    if self.direction == 'b':
+                        spa_mask = spa_mask.repeat(1, 2, 1, 1)
+                    else:
+                        spa_mask = spa_mask.repeat(1, 4, 1, 1)
+                    if gat_mask.size(1) == 1:
+                        gat_mask = gat_mask.repeat(1, 4, 1, 1)
+                    else:
+                        gat_mask = gat_mask.repeat(1, 2, 1, 1)
+                    gat_mask = torch.cat([gat_mask, spa_mask], dim=1)
+                elif self.mask_method == 1:
+                    gat_mask = spa_mask.repeat(1, 3, 1, 1)
+                elif gat_mask.size(1) != 1:
+                    gat_mask = gat_mask.repeat(1, 6, 1, 1)
+            elif self.config.num_attention_heads == 16:
+                if self.mask_method == 0:
+                    if self.direction == 'b':
+                        spa_mask = spa_mask.repeat(1, 3, 1, 1)
+                    else:
+                        spa_mask = spa_mask.repeat(1, 6, 1, 1)
+                    if gat_mask.size(1) == 1:
+                        gat_mask = gat_mask.repeat(1, 4, 1, 1)
+                    else:
+                        gat_mask = gat_mask.repeat(1, 2, 1, 1)
+                    gat_mask = torch.cat([gat_mask, spa_mask], dim=1)
+                elif self.mask_method == 1:
+                    gat_mask = spa_mask.repeat(1, 4, 1, 1)
+                elif gat_mask.size(1) != 1:
+                    gat_mask = gat_mask.repeat(1, 8, 1, 1)
+            else:
+                raise NotImplementedError()
+        elif self.position_embedding_type == "shared":
+            rel_mask = self.distance_embedding(spa_mask)
+        elif self.position_embedding_type == 'separeted':
+            rel_mask = spa_mask
         else:
             raise NotImplementedError()
         if head_mask is None:
             head_mask = [None] * self.num_gat_layers
         extended_gat_mask = convert_mask_to_reality(gat_mask)
         if self.cnn_mode == 'each':
-            gat_outputs = self.gat(gat_inputs, visual_feature, attention_mask=extended_gat_mask, head_mask=head_mask)
+            gat_outputs = self.gat(gat_inputs, visual_feature, attention_mask=extended_gat_mask,
+                                   head_mask=head_mask, rel_mask=rel_mask)
         else:
-            gat_outputs = self.gat(gat_inputs, attention_mask=extended_gat_mask, head_mask=head_mask)
+            gat_outputs = self.gat(gat_inputs, attention_mask=extended_gat_mask, head_mask=head_mask, rel_mask=rel_mask)
         final_outputs = gat_outputs[0]
         tag_logits = self.gat_outputs(final_outputs)
         tag_logits = tag_logits.squeeze(-1)
