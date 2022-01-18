@@ -238,7 +238,8 @@ def get_xpath_and_treeid4tokens(html_code, unique_tids, max_depth):
     return xpath_tag_map, xpath_subs_map
 
 
-def read_squad_examples(input_file, is_training, tokenizer, base_mode, max_depth=50, sample_size=None, simplify=False):
+def read_squad_examples(input_file, is_training, tokenizer, base_mode, max_depth=50,
+                        sample_size=None, simplify_html=False, simplify=False):
     """Read a SQuAD json file into a list of SquadExample."""
     with open(input_file, "r", encoding='utf-8') as reader:
         input_data = json.load(reader)["data"]
@@ -402,7 +403,10 @@ def read_squad_examples(input_file, is_training, tokenizer, base_mode, max_depth
             # Generate Doc Tokens
             page_id = website["page_id"]
             curr_dir = osp.join(osp.dirname(input_file), domain, page_id[0:2], 'processed_data')
-            html_file = open(osp.join(curr_dir, page_id + '.html')).read()
+            if simplify_html:
+                html_file = open(osp.join(curr_dir, page_id + '.simp')).read()
+            else:
+                html_file = open(osp.join(curr_dir, page_id + '.html')).read()
             html_code = bs(html_file)
 
             raw_text_list, tag_num = html_to_text_list(html_code)

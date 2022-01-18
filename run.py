@@ -370,15 +370,17 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
     base_cached_features_file = os.path.join(os.path.dirname(input_file), 'cached', '{}_{}_{}_{}'.format(
         'cached' if not args.slice_cache or evaluate else 'slice',
         split,
-        list(filter(None, args.model_name_or_path.split('/'))).pop(),
+        list(filter(None, args.model_name_or_path.split('/'))).pop().split('_')[0],
         str(args.max_seq_length)))
     cached_features_file = '{}_{}'.format(base_cached_features_file,
                                           args.loss_method if 'soft' not in args.loss_method
                                           else '{}_{}'.format(args.soft_remain, args.soft_decay))
     if args.add_xpath:
-        cached_features_file += 'X'
-    cached_features_file = cached_features_file.replace('markuplm_base', 'markuplm').replace('markuplm_large', 'markuplm')
-    cached_features_file = cached_features_file.replace('roberta_base', 'roberta').replace('roberta_large', 'roberta')
+        cached_features_file += '_X'
+    if args.simplify:
+        cached_features_file += '_S'
+    if args.all_positive:
+        cached_features_file += '_P'
 
     if os.path.exists(cached_features_file) and not args.overwrite_cache and not args.enforce:
         logger.info("Loading features from cached file %s", cached_features_file)
@@ -393,17 +395,13 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
                                                  is_training=not evaluate,
                                                  tokenizer=tokenizer,
                                                  base_mode=args.model_type,
+                                                 simplify_html=args.simplify,
                                                  simplify=True)
         if not evaluate:
             tag_list = list(tag_list)
             tag_list.sort()
             tokenizer.add_tokens(tag_list)
 
-        # if args.temp:
-            # features = [f for f in features if not f.is_impossible]
-            # torch.save(features, cached_features_file + 'A')
-            # raise SystemError('Mission complete!')
-            # pass
     else:
         logger.info("Creating features from dataset file at %s", input_file)
 
@@ -412,6 +410,7 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
                                                      is_training=not evaluate,
                                                      tokenizer=tokenizer,
                                                      base_mode=args.model_type,
+                                                     simplify_html=args.simplify,
                                                      simplify=True)
             tag_list = list(tag_list)
             tag_list.sort()
@@ -421,6 +420,7 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
                                           is_training=not evaluate,
                                           tokenizer=tokenizer,
                                           base_mode=args.model_type,
+                                          simplify_html=args.simplify,
                                           simplify=False,
                                           sample_size=args.sample_size if args.enforce else None)
 
@@ -434,6 +434,8 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
                                                 soft_remain=args.soft_remain,
                                                 soft_decay=args.soft_decay,
                                                 is_training=not evaluate)
+        if args.all_positive:
+            features = [f for f in features if not f.is_impossible]
         if args.local_rank in [-1, 0] and not args.enforce:
             logger.info("Saving features into cached file %s", cached_features_file)
             if args.slice_cache and not evaluate:
@@ -669,6 +671,8 @@ def main():
     parser.add_argument('--add_xpath', action='store_true')
     parser.add_argument('--temp', action='store_true')
     parser.add_argument('--max_rel_position_embeddings', default=None, type=int)
+    parser.add_argument('--simplify', action='store_true')
+    parser.add_argument('--all_positive', action='store_true')
     args = parser.parse_args()
 
     if os.path.exists(args.output_dir) and os.listdir(
