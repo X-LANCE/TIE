@@ -453,7 +453,8 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
                     num = ((total // 64) // args.separate_read) * 64
                     for i in range(args.separate_read - 1):
                         torch.save(features[i * num:(i + 1) * num], cached_features_file + '_sub_{}'.format(i + 1))
-                    torch.save(features[args.separate_read - 1 * num:], cached_features_file + '_sub_8')
+                    torch.save(features[(args.separate_read - 1) * num:],
+                               cached_features_file + '_sub_{}'.format(args.separate_read))
                     # torch.save(features[num:], cached_features_file + '_sub2')
                     torch.save(total, cached_features_file + '_total')
 
@@ -467,7 +468,8 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
         num = ((total // 64) // args.separate_read) * 64
         for i in range(args.separate_read - 1):
             torch.save(features[i * num:(i + 1) * num], cached_features_file + '_sub_{}'.format(i + 1))
-        torch.save(features[args.separate_read - 1 * num:], cached_features_file + '_sub_8')
+        torch.save(features[(args.separate_read - 1) * num:],
+                   cached_features_file + '_sub_{}'.format(args.separate_read))
         # torch.save(features[num:], cached_features_file + '_sub2')
         torch.save(total, cached_features_file + '_total')
         raise SystemError('Mission complete!')
@@ -826,7 +828,7 @@ def main():
                 if global_step and args.eval_to_checkpoint and int(global_step) >= args.eval_to_checkpoint:
                     continue
                 tie_config = TIEConfig.from_pretrained(checkpoint)
-                model.from_pretrained(checkpoint, config=tie_config)
+                model = TIE.from_pretrained(checkpoint, config=tie_config)
                 model.to(args.device)
 
                 # Evaluate

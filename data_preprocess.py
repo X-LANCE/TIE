@@ -133,7 +133,7 @@ def advanced_mask(args):
     8 - crossing
     """
     print('Start advanced process!!!')
-    except_domain = ['sports']
+    except_domain = []
     for d, _, fs in os.walk(args.root_dir):
         if (d.split('/') + [''])[1] in except_domain:
             continue
@@ -145,7 +145,7 @@ def advanced_mask(args):
             html = bs(open(os.path.join(d, f)))
             rect = json.load(open(os.path.join(d, page_id + '.json')))
             max_tid = max([int(k) for k in rect]) + 1
-            mask = np.zeros((max_tid, max_tid), dtype=np.int8)
+            mask = np.zeros((max_tid + 2, max_tid + 2), dtype=np.int8)
             ind = np.diag_indices_from(mask)
             mask[:, 0:2] = 3
             mask[0:2, :] = 2

@@ -205,22 +205,26 @@ class StrucDataset(_BaseDataset):
             spa_mask[base + len(app_tags), :base] = 11
             ind = np.diag_indices_from(spa_mask)
             spa_mask[ind] = 1
-            spa_mask[base:base + len(app_tags), base:base + len(app_tags)] = self.spatial_mask[app_tags][:, app_tags]
+            temp = np.array(self.spatial_mask[self.page_id[index]])
+            spa_mask[base:base + len(app_tags), base:base + len(app_tags)] = temp[app_tags][:, app_tags]
             output.append(spa_mask)
             gat_mask = torch.zeros((self.shape[0], self.shape[0]), dtype=torch.long)
             gat_mask[:base + len(app_tags) + 1, :base + len(app_tags) + 1] = 1
             output.append(spa_mask)
         else:
-            gat_mask = torch.zeros((1, self.shape[0], self.shape[0]), dtype=torch.long)
-            gat_mask[:, :base, :base + len(app_tags) + 1] = 1
-            gat_mask[:, base + len(app_tags), :base + len(app_tags) + 1] = 1
             temp = torch.tensor(form_tree_mask(app_tags, html_tree, separate=self.separate,
                                                accelerate=self.mask_method != 3))
             if self.separate:  # TODO multiple mask and variable total head number implementation
-                gat_mask = gat_mask.repeat(2, 1, 1)
+                gat_mask = torch.zeros((2, self.shape[0], self.shape[0]), dtype=torch.long)
+                gat_mask[:, :base, :base + len(app_tags) + 1] = 1
+                gat_mask[:, base + len(app_tags), :base + len(app_tags) + 1] = 1
+                # gat_mask = gat_mask.repeat(2, 1, 1)
                 gat_mask[:, base:base + len(app_tags), base:base + len(app_tags)] = torch.tensor(temp[0:2])
                 # tree_children = torch.tensor(temp[2])
             else:
+                gat_mask = torch.zeros((1, self.shape[0], self.shape[0]), dtype=torch.long)
+                gat_mask[:, :base, :base + len(app_tags) + 1] = 1
+                gat_mask[:, base + len(app_tags), :base + len(app_tags) + 1] = 1
                 gat_mask[:, base:base + len(app_tags), base:base + len(app_tags)] = torch.tensor(temp[0])
                 # tree_children = torch.tensor(temp[1])
             output.append(gat_mask)

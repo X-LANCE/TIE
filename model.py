@@ -234,6 +234,7 @@ class TIEConfig(PretrainedConfig):
         self.max_position_embeddings = kwargs.pop("max_position_embeddings", None)
         super().__init__(**kwargs)
         if args is not None:
+            self.ptm_model_type = args.model_type
             self.method = args.method
             self.loss_method = args.loss_method
             self.num_gat_layers = args.num_node_block
@@ -312,7 +313,7 @@ class TIE(BertPreTrainedModel):
     def __init__(self, config: TIEConfig, init_plm=False):
         super(TIE, self).__init__(config)
         self.method = config.method
-        self.base_type = config.model_type
+        self.base_type = getattr(config, 'ptm_model_type', 'markuplm')
         self.loss_method = config.loss_method
         self.mask_method = config.mask_method
         self.cnn_mode = config.cnn_mode
@@ -321,7 +322,6 @@ class TIE(BertPreTrainedModel):
 
         if init_plm:
             if self.base_type == 'markuplm':
-                print('!!!', config.name_or_path)
                 self.ptm = MarkupLMForQuestionAnswering.from_pretrained(config.name_or_path, config=config)
             else:
                 self.ptm = AutoModelForQuestionAnswering.from_pretrained(config.name_or_path, config=config)
