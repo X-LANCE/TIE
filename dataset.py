@@ -13,11 +13,16 @@ class _BaseDataset(Dataset):
     def _init_spatial_mask(self, mask_dir, method):
         if method < 2:
             suffix = '.spatial.json'
+            if self.simplify:
+                suffix = '.simp' + suffix
+            else:
+                suffix = '.html' + suffix
         elif method > 3:
             suffix = '.advanced.json'
         else:
             self.spatial_mask = None
             return
+        print(suffix)
         if isinstance(mask_dir, dict):
             self.spatial_mask = mask_dir
             return
@@ -58,6 +63,7 @@ class SubDataset(_BaseDataset):
         self.base_name = base_name
         self.input_file = args.predict_file if evaluate else args.train_file
         self.args = args
+        self.simplify = args.simplify
 
         self.current_part = 1
         self.passed_index = 0
@@ -104,13 +110,20 @@ class SubDataset(_BaseDataset):
                                         training=False, page_id=all_page_id, mask_method=self.args.mask_method,
                                         mask_dir=self.spatial_mask,
                                         separate=self.args.separate_mask, cnn_feature_dir=self.args.cnn_feature_dir,
-                                        direction=self.args.direction)
+                                        direction=self.args.direction,
+                                        simplify=self.simplify, question_mode=self.args.question_mode)
         else:
             all_answer_tid = torch.tensor([f.answer_tid for f in features],
                                           dtype=torch.long if self.args.loss_method == 'base' else torch.float)
+            if self.args.merge is not None:
+                all_start_positions = torch.tensor([f.start_position for f in features], dtype=torch.long)
+                all_end_positions = torch.tensor([f.end_position for f in features], dtype=torch.long)
+            else:
+                all_start_positions, all_end_positions = None, None
             self.dataset = StrucDataset(all_input_ids, all_input_mask, all_segment_ids, all_answer_tid, all_tag_depth,
                                         all_xpath_tags_seq, all_xpath_subs_seq,
                                         all_xpath_tags_seq_tag, all_xpath_subs_seq_tag,
+                                        all_start_positions, all_end_positions,
                                         # tag_list=all_tag_lists,
                                         gat_mask=(all_app_tags, all_example_index, self.all_html_trees),
                                         base_index=all_base_index,
@@ -119,7 +132,8 @@ class SubDataset(_BaseDataset):
                                         training=True, page_id=all_page_id, mask_method=self.args.mask_method,
                                         mask_dir=self.spatial_mask,
                                         separate=self.args.separate_mask, cnn_feature_dir=self.args.cnn_feature_dir,
-                                        direction=self.args.direction)
+                                        direction=self.args.direction,
+                                        simplify=self.simplify, question_mode=self.args.question_mode)
 
     def __getitem__(self, index):
         if index - self.passed_index < 0:
@@ -146,7 +160,8 @@ class StrucDataset(_BaseDataset):
     """
 
     def __init__(self, *tensors, tag_list=None, gat_mask=None, base_index=None, tag2tok=None, shape=None, training=True,
-                 page_id=None, mask_method=1, mask_dir=None, direction=None, separate=False, cnn_feature_dir=None):
+                 page_id=None, mask_method=1, mask_dir=None, direction=None, separate=False, cnn_feature_dir=None,
+                 simplify=False, question_mode=0):
         tensors = tuple(tensor for tensor in tensors if tensor is not None)
         assert all(len(tensors[0]) == len(tensor) for tensor in tensors)
         self.tensors = tensors
@@ -161,6 +176,8 @@ class StrucDataset(_BaseDataset):
         self.direction = direction
         self.separate = separate
         self.cnn_feature_dir = cnn_feature_dir
+        self.simplify = simplify
+        self.question_mode = question_mode
         self._init_spatial_mask(mask_dir, self.mask_method)
         self._init_cnn_feature()
 
@@ -172,6 +189,9 @@ class StrucDataset(_BaseDataset):
         example_index = self.gat_mask[1][index]
         html_tree = self.gat_mask[2][example_index]
         base = self.base_index[index]
+
+        if self.question_mode == 4 and self.training and output[3] != 0:
+            output[3] = output[3] - base + 3
 
         if self.cnn_feature is not None:
             page_id, ind = self.page_id[index], self.tag_list[index]
@@ -189,10 +209,24 @@ class StrucDataset(_BaseDataset):
                 spa_mask = torch.zeros((4, self.shape[0], self.shape[0]), dtype=torch.long)
             else:
                 spa_mask = torch.zeros((2, self.shape[0], self.shape[0]), dtype=torch.long)
-            spa_mask[:, :base, :base + len(app_tags) + 1] = 1
-            spa_mask[:, base + len(app_tags), :base + len(app_tags) + 1] = 1
+            if self.question_mode == 0:
+                spa_mask[:, :base, :base + len(app_tags) + 1] = 1
+                spa_mask[:, base + len(app_tags), :base + len(app_tags) + 1] = 1
+            elif self.question_mode == 1:
+                spa_mask[:, :base + len(app_tags) + 1, :base] = 1
+                spa_mask[:, :base + len(app_tags) + 1, base + len(app_tags)] = 1
+            elif self.question_mode == 2:
+                spa_mask[:, :base + len(app_tags) + 1, :base + len(app_tags) + 1] = 1
+            elif self.question_mode == 3:
+                spa_mask[:, 1, :base + len(app_tags) + 1] = 1
+            elif self.question_mode != 4:
+                raise NotImplementedError()
             temp = form_spatial_mask(app_tags, self.spatial_mask[self.page_id[index]], self.direction)
-            spa_mask[:, base:base + len(app_tags), base:base + len(app_tags)] = torch.tensor(temp)
+            if self.question_mode == 4:
+                spa_mask[:, :len(app_tags) + 4, :len(app_tags) + 4] = 1
+                spa_mask[:, 3:3 + len(app_tags), 3:3 + len(app_tags)] = torch.tensor(temp)
+            else:
+                spa_mask[:, base:base + len(app_tags), base:base + len(app_tags)] = torch.tensor(temp)
             output.append(spa_mask)
 
         if self.mask_method > 3:
@@ -206,26 +240,54 @@ class StrucDataset(_BaseDataset):
             ind = np.diag_indices_from(spa_mask)
             spa_mask[ind] = 1
             temp = np.array(self.spatial_mask[self.page_id[index]])
-            spa_mask[base:base + len(app_tags), base:base + len(app_tags)] = temp[app_tags][:, app_tags]
-            output.append(spa_mask)
-            gat_mask = torch.zeros((self.shape[0], self.shape[0]), dtype=torch.long)
-            gat_mask[:base + len(app_tags) + 1, :base + len(app_tags) + 1] = 1
-            output.append(spa_mask)
+            app_tags_temp = [t if t < temp.shape[0] else -1 for t in app_tags]
+            spa_mask[base:base + len(app_tags), base:base + len(app_tags)] = temp[app_tags_temp][:, app_tags_temp]
+            output.append(torch.tensor(spa_mask, dtype=torch.long))
+            gat_mask = torch.zeros((1, self.shape[0], self.shape[0]), dtype=torch.long)
+            gat_mask[:, :base + len(app_tags) + 1, :base + len(app_tags) + 1] = 1
+            output.append(gat_mask)
         else:
             temp = torch.tensor(form_tree_mask(app_tags, html_tree, separate=self.separate,
                                                accelerate=self.mask_method != 3))
             if self.separate:  # TODO multiple mask and variable total head number implementation
                 gat_mask = torch.zeros((2, self.shape[0], self.shape[0]), dtype=torch.long)
-                gat_mask[:, :base, :base + len(app_tags) + 1] = 1
-                gat_mask[:, base + len(app_tags), :base + len(app_tags) + 1] = 1
-                # gat_mask = gat_mask.repeat(2, 1, 1)
-                gat_mask[:, base:base + len(app_tags), base:base + len(app_tags)] = torch.tensor(temp[0:2])
+                if self.question_mode == 0:
+                    gat_mask[:, :base, :base + len(app_tags) + 1] = 1
+                    gat_mask[:, base + len(app_tags), :base + len(app_tags) + 1] = 1
+                elif self.question_mode == 1:
+                    gat_mask[:, :base + len(app_tags) + 1, :base] = 1
+                    gat_mask[:, :base + len(app_tags) + 1, base + len(app_tags)] = 1
+                elif self.question_mode == 2:
+                    gat_mask[:, :base + len(app_tags) + 1, :base + len(app_tags) + 1] = 1
+                elif self.question_mode == 3:
+                    gat_mask[:, 1, :base + len(app_tags) + 1] = 1
+                elif self.question_mode != 4:
+                    raise NotImplementedError()
+                if self.question_mode == 4:
+                    gat_mask[:, :len(app_tags) + 4, :len(app_tags) + 4] = 1
+                    gat_mask[:, 3:3 + len(app_tags), 3:3 + len(app_tags)] = torch.tensor(temp[0:2])
+                else:
+                    gat_mask[:, base:base + len(app_tags), base:base + len(app_tags)] = torch.tensor(temp[0:2])
                 # tree_children = torch.tensor(temp[2])
             else:
                 gat_mask = torch.zeros((1, self.shape[0], self.shape[0]), dtype=torch.long)
-                gat_mask[:, :base, :base + len(app_tags) + 1] = 1
-                gat_mask[:, base + len(app_tags), :base + len(app_tags) + 1] = 1
-                gat_mask[:, base:base + len(app_tags), base:base + len(app_tags)] = torch.tensor(temp[0])
+                if self.question_mode == 0:
+                    gat_mask[:, :base, :base + len(app_tags) + 1] = 1
+                    gat_mask[:, base + len(app_tags), :base + len(app_tags) + 1] = 1
+                elif self.question_mode == 1:
+                    gat_mask[:, :base + len(app_tags) + 1, :base] = 1
+                    gat_mask[:, :base + len(app_tags) + 1, base + len(app_tags)] = 1
+                elif self.question_mode == 2:
+                    gat_mask[:, :base + len(app_tags) + 1, :base + len(app_tags) + 1] = 1
+                elif self.question_mode == 3:
+                    gat_mask[:, 1, :base + len(app_tags) + 1] = 1
+                elif self.question_mode != 4:
+                    raise NotImplementedError()
+                if self.question_mode == 4:
+                    gat_mask[:, :len(app_tags) + 4, :len(app_tags) + 4] = 1
+                    gat_mask[:, 3:3 + len(app_tags), 3:3 + len(app_tags)] = torch.tensor(temp[0])
+                else:
+                    gat_mask[:, base:base + len(app_tags), base:base + len(app_tags)] = torch.tensor(temp[0])
                 # tree_children = torch.tensor(temp[1])
             output.append(gat_mask)
 
@@ -239,6 +301,10 @@ class StrucDataset(_BaseDataset):
         for i in range(len(tag_to_token_index)):
             temp = tag_to_token_index[i]
             pooling_matrix[i][temp[0]: temp[1] + 1] = 1 / (temp[1] - temp[0] + 1)
+        if self.question_mode == 4:
+            pooling_matrix[2:len(tag_to_token_index) - base + 3] = pooling_matrix[base - 1: len(tag_to_token_index)]
+            pooling_matrix[1] = 0
+            pooling_matrix[1][1: base - 1] = 1 / (base - 2)
         pooling_matrix = torch.tensor(pooling_matrix, dtype=torch.float)
         output.append(pooling_matrix)
 

@@ -239,7 +239,7 @@ def get_xpath_and_treeid4tokens(html_code, unique_tids, max_depth):
 
 
 def read_squad_examples(input_file, is_training, tokenizer, base_mode, max_depth=50,
-                        sample_size=None, simplify_html=False, simplify=False):
+                        sample_size=None, simplify_html=False, simplify=False, use_t=False):
     """Read a SQuAD json file into a list of SquadExample."""
     with open(input_file, "r", encoding='utf-8') as reader:
         input_data = json.load(reader)["data"]
@@ -287,14 +287,16 @@ def read_squad_examples(input_file, is_training, tokenizer, base_mode, max_depth
         return offset
 
     def e_id_to_t_id(e_id, html):
-        t_id = 0
+        t_id, real_eid = 0, 0
         for element in html.descendants:
             if type(element) == bs4.element.NavigableString and element.strip():
                 t_id += 1
             if type(element) == bs4.element.Tag:
                 if int(element.attrs['tid']) >= e_id:
                     break
-        return t_id
+                else:
+                    real_eid += 1
+        return t_id, real_eid
 
     def calc_num_from_raw_text_list(t_id, l):
         n_char = 0
@@ -429,7 +431,7 @@ def read_squad_examples(input_file, is_training, tokenizer, base_mode, max_depth
             doc_tokens.append('yes')
             char_to_word_offset.append(len(doc_tokens) - 1)
 
-            if base_mode != 'markuplm':
+            if base_mode != 'markuplm' and not use_t:
                 real_text, tag_list = html_to_text(bs(html_file))
                 all_tag_list = all_tag_list | tag_list
                 char_to_word_offset = adjust_offset(char_to_word_offset, real_text)
@@ -464,7 +466,7 @@ def read_squad_examples(input_file, is_training, tokenizer, base_mode, max_depth
                         all_doc_tokens.append(sub_token)
 
                 # Generate extra information for features
-                if base_mode != 'markuplm':
+                if base_mode != 'markuplm' and not use_t:
                     tok_to_tags_index, tags_to_tok_index, orig_tags = word_to_tag_from_text(all_doc_tokens,
                                                                                             bs(html_file))
                     xpath_tag_map, xpath_subs_map = None, None
@@ -503,9 +505,8 @@ def read_squad_examples(input_file, is_training, tokenizer, base_mode, max_depth
                             answer_tid = len(orig_tags) - 2 + answer["answer_start"]
                             num_char = len(char_to_word_offset) - 2
                         else:
-                            answer_tid = answer["element_id"]
-                            num_char = calc_num_from_raw_text_list(e_id_to_t_id(answer["element_id"], html_code),
-                                                                   raw_text_list)
+                            num_text, answer_tid = e_id_to_t_id(answer["element_id"], html_code)
+                            num_char = calc_num_from_raw_text_list(num_text, raw_text_list)
                         answer_offset = num_char + answer["answer_start"]
                         answer_length = len(orig_answer_text) if answer["element_id"] != -1 else 1
                         start_position = char_to_word_offset[answer_offset]
@@ -880,8 +881,8 @@ def _check_is_max_context(doc_spans, cur_span_index, position):
 RawTagResult = collections.namedtuple("RawResult", ["unique_id", "tag_logits"])
 
 
-def write_tag_predictions(all_examples, all_features, all_results, n_best_tag_size,
-                          output_tag_prediction_file, output_nbest_file, write_pred):
+def write_tag_predictions(all_examples, all_features, all_results, n_best_tag_size, model_name,
+                          output_tag_prediction_file, output_nbest_file, write_pred, qm):
     logger.info("Writing tag predictions to: %s" % output_tag_prediction_file)
 
     example_index_to_features = collections.defaultdict(list)
@@ -905,15 +906,25 @@ def write_tag_predictions(all_examples, all_features, all_results, n_best_tag_si
         prelim_predictions = []
         for (feature_index, feature) in enumerate(features):
             result = unique_id_to_result[feature.unique_id]
-            possible_values = [ind for ind in range(feature.base_index,
-                                                    feature.base_index + len(feature.app_tags))]
+            if qm:
+                possible_values = [ind for ind in range(3, 3 + len(feature.app_tags))]
+            else:
+                possible_values = [ind for ind in range(feature.base_index,
+                                                        feature.base_index + len(feature.app_tags))]
+            if model_name != 'markuplm':
+                possible_values = [ind for ind in possible_values
+                                   if feature.tag_to_token_index[ind][1] - feature.tag_to_token_index[ind][0] > 1 or
+                                   example.orig_tags[feature.app_tags[ind - feature.base_index]] in ['<no>', '<yes>']]
             tag_indexes = _get_best_tags(result.tag_logits, n_best_tag_size, possible_values)
             for ind in range(len(tag_indexes)):
                 tag_index = tag_indexes[ind]
                 if tag_index == 0:
                     continue
                 tag_logit = result.tag_logits[tag_index]
-                tag_id = feature.app_tags[tag_index - feature.base_index]
+                if qm:
+                    tag_id = feature.app_tags[tag_index - 3]
+                else:
+                    tag_id = feature.app_tags[tag_index - feature.base_index]
                 prelim_predictions.append(
                     _PrelimPrediction(
                         feature_index=feature_index,
@@ -975,7 +986,7 @@ def write_tag_predictions(all_examples, all_features, all_results, n_best_tag_si
         with open(output_tag_prediction_file, 'w') as writer:
             writer.write(json.dumps(all_tag_predictions, indent=4) + '\n')
 
-    return None, all_tag_predictions
+    return all_nbest_json, all_tag_predictions
 
 
 RawResult = collections.namedtuple("RawResult", ["unique_id", "start_logits", "end_logits"])
@@ -983,7 +994,8 @@ RawResult = collections.namedtuple("RawResult", ["unique_id", "start_logits", "e
 
 def write_predictions_provided_tag(all_examples, all_features, all_results, n_best_size, max_answer_length,
                                    do_lower_case, output_prediction_file, input_tag_prediction_file,
-                                   output_refined_tag_prediction_file, output_nbest_file, verbose_logging, write_pred):
+                                   output_refined_tag_prediction_file, output_nbest_file, verbose_logging,
+                                   write_pred, tag_mapping):
     logger.info("Writing predictions to: %s" % output_prediction_file)
     logger.info("Writing nbest to: %s" % output_nbest_file)
 
@@ -1014,7 +1026,10 @@ def write_predictions_provided_tag(all_examples, all_features, all_results, n_be
     all_predictions = collections.OrderedDict()
     all_nbest_json = collections.OrderedDict()
     all_refined_tag_predictions = collections.OrderedDict()
-    all_tag_predictions = json.load(open(input_tag_prediction_file))
+    if isinstance(input_tag_prediction_file, str):
+        all_tag_predictions = json.load(open(input_tag_prediction_file))
+    else:
+        all_tag_predictions = input_tag_prediction_file
 
     for (example_index, example) in enumerate(all_examples):
         features = example_index_to_features[example_index]
@@ -1049,6 +1064,8 @@ def write_predictions_provided_tag(all_examples, all_features, all_results, n_be
                         tag_ids = _get_tag_id(feature.tag_to_token_index,
                                               start_index, end_index,
                                               feature.base_index, feature.app_tags)
+                        if tag_mapping is not None:
+                            tag_ids = tag_mapping[feature.page_id][tag_ids]
                         prelim_predictions.append(
                             _PrelimPrediction(
                                 feature_index=feature_index,

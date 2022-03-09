@@ -26,7 +26,7 @@ def generate_valid_points(h, r):
         key = e['tid']
         if key not in r or 'rect' not in r[key]:
             continue
-        if 0.0 in list(r[key]['rect'].values()):
+        if 0.0 in [r[key]['rect']['width'], r[key]['rect']['height']]:
             continue
         # bb = r[key]['rect']
         # x = bb['x'] + bb['width'] / 2
@@ -40,13 +40,13 @@ def rect_process(args):
     for d, _, fs in os.walk(args.root_dir):
         print('Start process dir:', d)
         for f in tqdm(fs):
-            if not f.endswith('.html'):
+            if not f.endswith(args.tail):
                 continue
             page_id = f.split('.')[0]
             html = bs(open(os.path.join(d, f)))
             rect = json.load(open(os.path.join(d, page_id + '.json')))
             position = generate_valid_points(html, rect)
-            with open(os.path.join(d, page_id + '.points.json'), 'w') as o:
+            with open(os.path.join(d, page_id + '.' + args.tail + '.points.json'), 'w') as o:
                 json.dump(position, o)
         print('Successfully finish dir:', d)
 
@@ -68,7 +68,7 @@ def mask_process(args):
     for d, _, fs in os.walk(args.root_dir):
         print('Start process dir:', d)
         for f in tqdm(fs):
-            if not f.endswith('.points.json'):
+            if not f.endswith(args.tail + '.points.json'):
                 continue
             rect = json.load(open(os.path.join(d, f)))
             # rect_x = json.load(open(os.path.join(d, f)))
@@ -115,7 +115,7 @@ def mask_process(args):
                             add_edge(lw, tuple_rect[i][0], tuple_rect[j][0])
                         if att['x'] + att['width'] >= curr_x[1]:
                             add_edge(rw, tuple_rect[i][0], tuple_rect[j][0])
-            with open(os.path.join(d, f.split('.')[0] + '.spatial.json'), 'w') as o:
+            with open(os.path.join(d, f.split('.')[0] + '.' + args.tail + '.spatial.json'), 'w') as o:
                 json.dump({'h': h, 'v': v, 'l': l, 'r': r, 'u': u, 'd': dd, 'lw': lw, 'rw': rw, 'uw': uw, 'dw': dw}, o)
         print('Successfully finish dir:', d)
 
@@ -185,21 +185,21 @@ def advanced_mask(args):
                                 target_rect['y'] + target_rect['height'] > source_rect['y'] + source_rect['height']:
                             if mask[i, j] != 0:
                                 mask[i, j] = 8
-                                continue
-                            mask[i, j] = 5
+                            else:
+                                mask[i, j] = 5
                     if overlap_x >= args.percentage:
                         if target_rect['x'] < source_rect['x'] or \
                                 target_rect['x'] + target_rect['width'] < source_rect['x'] + source_rect['width']:
                             if mask[i, j] != 0:
                                 mask[i, j] = 8
-                                continue
-                            mask[i, j] = 6
+                            else:
+                                mask[i, j] = 6
                         if target_rect['x'] > source_rect['x'] or \
                                 target_rect['x'] + target_rect['width'] > source_rect['x'] + source_rect['width']:
                             if mask[i, j] != 0:
                                 mask[i, j] = 8
-                                continue
-                            mask[i, j] = 7
+                            else:
+                                mask[i, j] = 7
             with open(os.path.join(d, page_id + '.advanced.json'), 'w') as o:
                 json.dump(mask.tolist(), o)
         print('Successfully finish dir:', d)
@@ -210,6 +210,7 @@ def main():
     parser.add_argument('--root_dir', required=True, type=str)
     parser.add_argument('--task', required=True, choices=['rect', 'mask', 'rect_mask', 'advanced'])
     parser.add_argument('--percentage', default=0.5, type=float)
+    parser.add_argument('--tail', default='html', type=str)
     args = parser.parse_args()
 
     if 'rect' in args.task:

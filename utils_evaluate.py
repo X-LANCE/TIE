@@ -20,13 +20,14 @@ from bs4 import BeautifulSoup
 
 class EVAL_OPTS:
     def __init__(self, data_file, pred_file, tag_pred_file, result_file='',
-                 out_file="",  verbose=False):
+                 out_file="",  verbose=False, tag_mapping=None):
         self.data_file = data_file
         self.pred_file = pred_file
         self.tag_pred_file = tag_pred_file
         self.result_file = result_file
         self.out_file = out_file
         self.verbose = verbose
+        self.tag_mapping = tag_mapping
 
 
 def parse_args():
@@ -251,6 +252,9 @@ def main(OPTS):
             tag_preds = json.load(f)
     else:
         tag_preds = OPTS.tag_pred_file
+    if OPTS.tag_mapping is not None:
+        for k, v in tag_preds.items():
+            tag_preds[k] = OPTS.tag_mapping[k[:-5]][v]
     qid_to_has_ans = make_qid_to_has_ans(dataset)  # maps qid to True/False
     has_ans_qids = [k for k, v in qid_to_has_ans.items() if v]
     no_ans_qids = [k for k, v in qid_to_has_ans.items() if not v]

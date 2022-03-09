@@ -4,10 +4,11 @@ import math
 
 import torch
 import torch.nn as nn
+from torch.nn import CrossEntropyLoss
 from transformers.modeling_outputs import BaseModelOutputWithPastAndCrossAttentions
 from transformers.models.bert.modeling_bert import BertEncoder, BertPreTrainedModel, BertSelfAttention, BertAttention, \
     BertLayer, BertSelfOutput, BertIntermediate, BertOutput
-from transformers import PretrainedConfig, AutoModelForQuestionAnswering, apply_chunking_to_forward
+from transformers import PretrainedConfig, AutoConfig, AutoModelForQuestionAnswering, apply_chunking_to_forward
 
 from markuplmft import MarkupLMForQuestionAnswering
 
@@ -20,15 +21,15 @@ class TIESelfAttention(BertSelfAttention):
             self.distance_embedding = nn.Embedding(config.max_rel_position_embeddings, self.attention_head_size)
 
     def forward(
-        self,
-        hidden_states,
-        attention_mask=None,
-        head_mask=None,
-        encoder_hidden_states=None,
-        encoder_attention_mask=None,
-        past_key_value=None,
-        output_attentions=False,
-        rel_mask=None,
+            self,
+            hidden_states,
+            attention_mask=None,
+            head_mask=None,
+            encoder_hidden_states=None,
+            encoder_attention_mask=None,
+            past_key_value=None,
+            output_attentions=False,
+            rel_mask=None,
     ):
 
         query_layer = self.transpose_for_scores(self.query(hidden_states))
@@ -82,15 +83,15 @@ class TIEAttention(BertAttention):
         self.pruned_heads = set()
 
     def forward(
-        self,
-        hidden_states,
-        attention_mask=None,
-        head_mask=None,
-        encoder_hidden_states=None,
-        encoder_attention_mask=None,
-        past_key_value=None,
-        output_attentions=False,
-        rel_mask=None,
+            self,
+            hidden_states,
+            attention_mask=None,
+            head_mask=None,
+            encoder_hidden_states=None,
+            encoder_attention_mask=None,
+            past_key_value=None,
+            output_attentions=False,
+            rel_mask=None,
     ):
         self_outputs = self.self(
             hidden_states,
@@ -119,15 +120,15 @@ class TIELayer(BertLayer):
         self.output = BertOutput(config)
 
     def forward(
-        self,
-        hidden_states,
-        attention_mask=None,
-        head_mask=None,
-        encoder_hidden_states=None,
-        encoder_attention_mask=None,
-        past_key_value=None,
-        output_attentions=False,
-        rel_mask=None,
+            self,
+            hidden_states,
+            attention_mask=None,
+            head_mask=None,
+            encoder_hidden_states=None,
+            encoder_attention_mask=None,
+            past_key_value=None,
+            output_attentions=False,
+            rel_mask=None,
     ):
         # decoder uni-directional self-attention cached key/values tuple is at positions 1,2
         self_attn_past_key_value = past_key_value[:2] if past_key_value is not None else None
@@ -158,18 +159,18 @@ class TIEEncoder(BertEncoder):
         self.gradient_checkpointing = False
 
     def forward(
-        self,
-        hidden_states,
-        attention_mask=None,
-        head_mask=None,
-        encoder_hidden_states=None,
-        encoder_attention_mask=None,
-        past_key_values=None,
-        use_cache=None,
-        output_attentions=False,
-        output_hidden_states=False,
-        return_dict=True,
-        rel_mask=None,
+            self,
+            hidden_states,
+            attention_mask=None,
+            head_mask=None,
+            encoder_hidden_states=None,
+            encoder_attention_mask=None,
+            past_key_values=None,
+            use_cache=None,
+            output_attentions=False,
+            output_hidden_states=False,
+            return_dict=True,
+            rel_mask=None,
     ):
         all_hidden_states = () if output_hidden_states else None
         all_self_attentions = () if output_attentions else None
@@ -235,6 +236,7 @@ class TIEConfig(PretrainedConfig):
         super().__init__(**kwargs)
         if args is not None:
             self.ptm_model_type = args.model_type
+            self.ptm_name_or_path = args.model_name_or_path
             self.method = args.method
             self.loss_method = args.loss_method
             self.num_gat_layers = args.num_node_block
@@ -245,6 +247,7 @@ class TIEConfig(PretrainedConfig):
             self.max_rel_position_embeddings = args.max_rel_position_embeddings
             self.direction = args.direction
             self.name_or_path = args.model_name_or_path
+            self.merge = args.merge is not None
             if args.mask_method == 4:
                 self.position_embedding_type = 'separated'
             elif args.mask_method == 5:
@@ -310,6 +313,8 @@ def convert_mask_to_reality(mask, dtype=torch.float):
 
 
 class TIE(BertPreTrainedModel):
+    base_model_prefix = "ptm"
+
     def __init__(self, config: TIEConfig, init_plm=False):
         super(TIE, self).__init__(config)
         self.method = config.method
@@ -319,17 +324,28 @@ class TIE(BertPreTrainedModel):
         self.cnn_mode = config.cnn_mode
         self.direction = config.direction
         self.position_embedding_type = config.position_embedding_type
+        try:
+            self.merge = config.merge
+        except AttributeError:
+            self.merge = False
 
         if init_plm:
             if self.base_type == 'markuplm':
                 self.ptm = MarkupLMForQuestionAnswering.from_pretrained(config.name_or_path, config=config)
             else:
-                self.ptm = AutoModelForQuestionAnswering.from_pretrained(config.name_or_path, config=config)
+                ptm_config = AutoConfig.from_pretrained(config.ptm_name_or_path)
+                self.ptm = AutoModelForQuestionAnswering.from_pretrained(config.ptm_name_or_path, config=ptm_config)
         else:
             if self.base_type == 'markuplm':
                 self.ptm = MarkupLMForQuestionAnswering(config)
             else:
-                self.ptm = AutoModelForQuestionAnswering.from_config(config)
+                ptm_config = AutoConfig.from_pretrained(config.ptm_name_or_path)
+                ptm_config.vocab_size = config.vocab_size
+                self.ptm = AutoModelForQuestionAnswering.from_config(ptm_config)
+        if self.merge:
+            self.qa_outputs = self.ptm.qa_outputs
+        else:
+            self.qa_outputs = None
         self.ptm = getattr(self.ptm, self.base_type)
         self.link = HTMLBasedPooling(self.method, config)
         self.num_gat_layers = config.num_gat_layers
@@ -362,6 +378,8 @@ class TIE(BertPreTrainedModel):
             xpath_subs_seq=None,
             xpath_tags_seq_tag=None,
             xpath_subs_seq_tag=None,
+            start_positions=None,
+            end_positions=None,
     ):
 
         if self.base_type == 'markuplm':
@@ -389,7 +407,7 @@ class TIE(BertPreTrainedModel):
             sequence_output = outputs[0]
             outputs = outputs[2:]
 
-        if xpath_tags_seq_tag is not None :
+        if xpath_tags_seq_tag is not None:
             assert xpath_subs_seq_tag is not None
             xpath_embedding = self.ptm.embeddings.xpath_embeddings(xpath_tags_seq_tag, xpath_subs_seq_tag)
         else:
@@ -433,7 +451,7 @@ class TIE(BertPreTrainedModel):
                 raise NotImplementedError()
         elif self.position_embedding_type == "shared":
             rel_mask = self.distance_embedding(spa_mask)
-        elif self.position_embedding_type == 'separeted':
+        elif self.position_embedding_type == 'separated':
             rel_mask = spa_mask
         else:
             raise NotImplementedError()
@@ -448,6 +466,34 @@ class TIE(BertPreTrainedModel):
         final_outputs = gat_outputs[0]
         tag_logits = self.gat_outputs(final_outputs)
         tag_logits = tag_logits.squeeze(-1)
+
+        if self.qa_outputs is not None:
+            logits = self.qa_outputs(sequence_output)
+            start_logits, end_logits = logits.split(1, dim=-1)
+            start_logits = start_logits.squeeze(-1).contiguous()
+            end_logits = end_logits.squeeze(-1).contiguous()
+
+            outputs = (start_logits, end_logits,) + outputs
+
+            if start_positions is not None and end_positions is not None:
+                # If we are on multi-GPU, split add a dimension
+                if len(start_positions.size()) > 1:
+                    start_positions = start_positions.squeeze(-1)
+                if len(end_positions.size()) > 1:
+                    end_positions = end_positions.squeeze(-1)
+                # sometimes the start/end positions are outside our model inputs, we ignore these terms
+                ignored_index = start_logits.size(1)
+                start_positions.clamp_(0, ignored_index)
+                end_positions.clamp_(0, ignored_index)
+
+                loss_fct = CrossEntropyLoss(ignore_index=ignored_index)
+                # print(start_positions)
+                # print(start_logits.size())
+                start_loss = loss_fct(start_logits, start_positions)
+                end_loss = loss_fct(end_logits, end_positions)
+                total_loss = (start_loss + end_loss) / 2
+                outputs = (total_loss,) + outputs
+
         if 'multi' in self.loss_method:
             tag_prob = nn.functional.sigmoid(tag_logits)
             outputs = (tag_prob,) + outputs
@@ -478,4 +524,4 @@ class TIE(BertPreTrainedModel):
             outputs = (loss,) + outputs
 
         return outputs
-        # (loss), tag_logits/probs, (hidden_states), (attentions)
+        # (loss), tag_logits/probs, (total_loss), (start_logits), (end_logits), (hidden_states), (attentions)

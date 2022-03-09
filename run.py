@@ -189,8 +189,15 @@ def train(args, train_dataset, model, tokenizer):
                 del inputs['token_type_ids']
             if args.model_type == 'roberta':
                 del inputs['token_type_ids']
+            if args.merge is not None:
+                inputs.update({
+                    'start_positions': batch[7],
+                    'end_positions': batch[8],
+                })
             outputs = model(**inputs)
             loss = outputs[0]
+            if args.merge is not None:
+                loss = args.merge * outputs[2] + loss
 
             if args.n_gpu > 1:
                 loss = loss.mean()  # mean() to average on multi-gpu parallel (not distributed) training
@@ -276,6 +283,8 @@ def evaluate(args, model, tokenizer, prefix="", write_pred=True):
     logger.info("  Num examples = %d", len(dataset))
     logger.info("  Batch size = %d", args.eval_batch_size)
     all_results = []
+    # selected_qa = ['sp090006513842']
+    # selected_results = []
     start_time = timeit.default_timer()
     for batch in tqdm(eval_dataloader, desc="Evaluating"):
         model.eval()
@@ -313,18 +322,36 @@ def evaluate(args, model, tokenizer, prefix="", write_pred=True):
                 del inputs['token_type_ids']
             feature_indices = batch[3]
             outputs = model(**inputs)
+            # outputs = model(**inputs, output_hidden_states=True, return_dict=True)
 
         for i, feature_index in enumerate(feature_indices):
             eval_feature = features[feature_index.item()]
             unique_id = int(eval_feature.unique_id)
-            if args.provided_tag_pred is not None:
-                result = RawResult(unique_id=unique_id,
-                                   start_logits=to_list(outputs[0][i]),
-                                   end_logits=to_list(outputs[1][i]))
+            if args.merge is not None:
+                result = (RawResult(unique_id=unique_id,
+                                    start_logits=to_list(outputs[1][i]),
+                                    end_logits=to_list(outputs[2][i])),
+                          RawTagResult(unique_id=unique_id,
+                                       tag_logits=to_list(outputs[0][i]))
+                          )
             else:
-                result = RawTagResult(unique_id=unique_id,
-                                      tag_logits=to_list(outputs[0][i]))
+                if args.provided_tag_pred is not None:
+                    # if examples[eval_feature.example_index].qas_id in selected_qa:
+                    #     selected_results.append({'unique_id': examples[eval_feature.example_index].qas_id,
+                    #                              'logits': [to_list(o[i]) for o in outputs.hidden_states],
+                    #                              'start_logits': to_list(outputs.start_logits[i]),
+                    #                              'end_logits': to_list(outputs.end_logits[i]),
+                    #                              'tokens': eval_feature.tokens,
+                    #                              'index': feature_index.item()})
+                    result = RawResult(unique_id=unique_id,
+                                       start_logits=to_list(outputs[0][i]),
+                                       end_logits=to_list(outputs[1][i]))
+                else:
+                    result = RawTagResult(unique_id=unique_id,
+                                          tag_logits=to_list(outputs[0][i]))
             all_results.append(result)
+    # with open('selected_logits_all_{}.json'.format(args.per_gpu_eval_batch_size), 'w') as o:
+    #     json.dump(selected_results, o, indent=2)
 
     eval_time = timeit.default_timer() - start_time
     logger.info("  Evaluation done in total %f secs (%f sec per example)", eval_time, eval_time / len(dataset))
@@ -336,16 +363,31 @@ def evaluate(args, model, tokenizer, prefix="", write_pred=True):
     output_result_file = os.path.join(args.output_dir, "qas_eval_results_{}.json".format(prefix))
     output_file = os.path.join(args.output_dir, "eval_matrix_results_{}".format(prefix))
 
-    if args.provided_tag_pred is not None:
-        returns = write_predictions_provided_tag(examples, features, all_results, args.n_best_size,
-                                                 args.max_answer_length, args.do_lower_case, output_prediction_file,
-                                                 args.provided_tag_pred, output_tag_prediction_file, output_nbest_file,
-                                                 args.verbose_logging, write_pred=write_pred)
+    if args.simplify:
+        tag_mapping = json.load(open('data/mapping.json'))
     else:
-        # TODO n best tag size greater than 1
-        returns = write_tag_predictions(examples, features, all_results, 1, output_tag_prediction_file,
-                                        output_nbest_file, write_pred=write_pred)
-        output_prediction_file = None
+        tag_mapping = None
+
+    if args.merge is not None:
+        returns, _ = write_tag_predictions(examples, features,
+                                           [r[1] for r in all_results], 1, args.model_type, output_tag_prediction_file,
+                                           output_nbest_file, write_pred=False, qm=args.question_mode == 4)
+        returns = write_predictions_provided_tag(examples, features,
+                                                 [r[0] for r in all_results], args.n_best_size,
+                                                 args.max_answer_length, args.do_lower_case, output_prediction_file,
+                                                 returns, output_tag_prediction_file, output_nbest_file,
+                                                 args.verbose_logging, write_pred=write_pred, tag_mapping=tag_mapping)
+    else:
+        if args.provided_tag_pred is not None:
+            returns = write_predictions_provided_tag(examples, features, all_results, args.n_best_size,
+                                                     args.max_answer_length, args.do_lower_case, output_prediction_file,
+                                                     args.provided_tag_pred, output_tag_prediction_file, output_nbest_file,
+                                                     args.verbose_logging, write_pred=write_pred, tag_mapping=tag_mapping)
+        else:
+            # TODO n best tag size greater than 1
+            returns = write_tag_predictions(examples, features, all_results, 1, args.model_type, output_tag_prediction_file,
+                                            output_nbest_file, write_pred=write_pred, qm=args.question_mode == 4)
+            output_prediction_file = None
 
     if not write_pred:
         output_prediction_file, output_tag_prediction_file = returns
@@ -355,7 +397,8 @@ def evaluate(args, model, tokenizer, prefix="", write_pred=True):
                                  pred_file=output_prediction_file,
                                  tag_pred_file=output_tag_prediction_file,
                                  result_file=output_result_file if write_pred else None,
-                                 out_file=output_file)
+                                 out_file=output_file,
+                                 tag_mapping=tag_mapping if args.provided_tag_pred is None else None)
     results = evaluate_on_squad(evaluate_options)
     return results
 
@@ -381,6 +424,8 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
         cached_features_file += '_S'
     if args.all_positive:
         cached_features_file += '_P'
+    if args.temp:
+        cached_features_file += '_T'
 
     if os.path.exists(cached_features_file) and not args.overwrite_cache and not args.enforce:
         logger.info("Loading features from cached file %s", cached_features_file)
@@ -396,7 +441,8 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
                                                  tokenizer=tokenizer,
                                                  base_mode=args.model_type,
                                                  simplify_html=args.simplify,
-                                                 simplify=True)
+                                                 use_t=args.temp,
+                                                 simplify=False if evaluate else True)
         if not evaluate:
             tag_list = list(tag_list)
             tag_list.sort()
@@ -411,6 +457,7 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
                                                      tokenizer=tokenizer,
                                                      base_mode=args.model_type,
                                                      simplify_html=args.simplify,
+                                                     use_t=args.temp,
                                                      simplify=True)
             tag_list = list(tag_list)
             tag_list.sort()
@@ -421,6 +468,7 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
                                           tokenizer=tokenizer,
                                           base_mode=args.model_type,
                                           simplify_html=args.simplify,
+                                          use_t=args.temp,
                                           simplify=False,
                                           sample_size=args.sample_size if args.enforce else None)
 
@@ -433,7 +481,10 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
                                                 max_tag_length=args.max_tag_length,
                                                 soft_remain=args.soft_remain,
                                                 soft_decay=args.soft_decay,
-                                                is_training=not evaluate)
+                                                is_training=not evaluate,
+                                                cls_token=tokenizer.cls_token,
+                                                sep_token=tokenizer.sep_token,
+                                                pad_token=tokenizer.pad_token_id,)
         if args.all_positive:
             features = [f for f in features if not f.is_impossible]
         if args.local_rank in [-1, 0] and not args.enforce:
@@ -520,19 +571,25 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
                                training=False, page_id=all_page_id, mask_method=args.mask_method,
                                mask_dir=os.path.dirname(input_file),
                                separate=args.separate_mask, cnn_feature_dir=args.cnn_feature_dir,
-                               direction=args.direction)
+                               direction=args.direction, simplify=args.simplify, question_mode=args.question_mode)
     else:
         all_answer_tid = torch.tensor([f.answer_tid for f in features],
                                       dtype=torch.long if 'base' in args.loss_method else torch.float)
+        if args.merge is not None:
+            all_start_positions = torch.tensor([f.start_position for f in features], dtype=torch.long)
+            all_end_positions = torch.tensor([f.end_position for f in features], dtype=torch.long)
+        else:
+            all_start_positions, all_end_positions = None, None
         dataset = StrucDataset(all_input_ids, all_input_mask, all_segment_ids, all_answer_tid, all_tag_depth,
                                all_xpath_tags_seq, all_xpath_subs_seq, all_xpath_tags_seq_tag, all_xpath_subs_seq_tag,
+                               all_start_positions, all_end_positions,
                                # tag_list=all_tag_lists,
                                gat_mask=(all_app_tags, all_example_index, all_html_trees), base_index=all_base_index,
                                tag2tok=all_tag_to_token, shape=(args.max_tag_length, args.max_seq_length),
                                training=True, page_id=all_page_id, mask_method=args.mask_method,
                                mask_dir=os.path.dirname(input_file),
                                separate=args.separate_mask, cnn_feature_dir=args.cnn_feature_dir,
-                               direction=args.direction)
+                               direction=args.direction, simplify=args.simplify, question_mode=args.question_mode)
 
     if evaluate:
         dataset = (dataset, examples, features)
@@ -675,6 +732,8 @@ def main():
     parser.add_argument('--max_rel_position_embeddings', default=12, type=int)
     parser.add_argument('--simplify', action='store_true')
     parser.add_argument('--all_positive', action='store_true')
+    parser.add_argument('--question_mode', default=0, type=int)
+    parser.add_argument('--merge', default=None, type=float)
     args = parser.parse_args()
 
     if os.path.exists(args.output_dir) and os.listdir(
