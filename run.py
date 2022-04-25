@@ -76,8 +76,7 @@ def train(args, train_dataset, model, tokenizer):
         train_sampler = SequentialSampler(train_dataset)
     else:
         train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
-    train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size,
-                                  num_workers=args.num_workers)
+    train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
 
     if args.max_steps > 0:
         t_total = args.max_steps
@@ -87,27 +86,11 @@ def train(args, train_dataset, model, tokenizer):
 
     # Prepare optimizer and schedule (linear warmup and decay)
     no_decay = ['bias', 'LayerNorm.weight']
-    if args.base_lr is not None:
-        optimizer_grouped_parameters = [
-            {'params': [p for n, p in model.named_parameters() if n.startswith('ptm') and
-                        not any(nd in n for nd in no_decay)],
-             'lr': args.base_lr, 'weight_decay': args.weight_decay},
-            {'params': [p for n, p in model.named_parameters() if n.startswith('ptm') and
-                        any(nd in n for nd in no_decay)],
-             'lr': args.base_lr, 'weight_decay': 0.0},
-            {'params': [p for n, p in model.named_parameters() if not n.startswith('ptm') and
-                        not any(nd in n for nd in no_decay)],
-             'weight_decay': args.weight_decay},
-            {'params': [p for n, p in model.named_parameters() if not n.startswith('ptm') and
-                        any(nd in n for nd in no_decay) and 'ptm' not in n],
-             'weight_decay': 0.0}
-        ]
-    else:
-        optimizer_grouped_parameters = [
-            {'params': [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
-             'weight_decay': args.weight_decay},
-            {'params': [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
-        ]
+    optimizer_grouped_parameters = [
+        {'params': [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
+         'weight_decay': args.weight_decay},
+        {'params': [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
+    ]
     optimizer = AdamW(optimizer_grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon)
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=int(args.warmup_steps * t_total),
                                                 num_training_steps=t_total)
@@ -170,22 +153,15 @@ def train(args, train_dataset, model, tokenizer):
                       'token_type_ids' : batch[2],
                       'answer_tid'     : batch[3],
                       'tag_depth'      : batch[4],
-                      'gat_mask'       : batch[-2],
+                      'dom_mask'       : batch[-2],
                       'tag_to_tok'     : batch[-1]}
-            if args.mask_method < 2 or args.mask_method > 3:
+            if args.mask_method < 2:
                 inputs.update({'spa_mask' : batch[-3]})
-                if args.cnn_feature_dir is not None:
-                    inputs.update({'visual_feature': batch[-4]})
             if args.model_type == 'markuplm':
                 inputs.update({
                     'xpath_tags_seq': batch[5],
                     'xpath_subs_seq': batch[6],
                 })
-                if args.add_xpath:
-                    inputs.update({
-                        'xpath_tags_seq_tag': batch[7],
-                        'xpath_subs_seq_tag': batch[8],
-                    })
                 del inputs['token_type_ids']
             if args.model_type == 'roberta':
                 del inputs['token_type_ids']
@@ -283,8 +259,6 @@ def evaluate(args, model, tokenizer, prefix="", write_pred=True):
     logger.info("  Num examples = %d", len(dataset))
     logger.info("  Batch size = %d", args.eval_batch_size)
     all_results = []
-    # selected_qa = ['sp090006513842']
-    # selected_results = []
     start_time = timeit.default_timer()
     for batch in tqdm(eval_dataloader, desc="Evaluating"):
         model.eval()
@@ -294,29 +268,20 @@ def evaluate(args, model, tokenizer, prefix="", write_pred=True):
                 inputs = {'input_ids': batch[0],
                           'attention_mask': batch[1],
                           'token_type_ids': batch[2]}
-                if args.cnn_feature_dir is not None:
-                    inputs.update({'visual_feature': batch[-5]})
             else:
                 inputs = {'input_ids'      : batch[0],
                           'attention_mask' : batch[1],
                           'token_type_ids' : batch[2],
                           'tag_depth'      : batch[4],
-                          'gat_mask'       : batch[-2],
+                          'dom_mask'       : batch[-2],
                           'tag_to_tok'     : batch[-1]}
-                if args.mask_method < 2 or args.mask_method > 3:
+                if args.mask_method < 2:
                     inputs.update({'spa_mask': batch[-3]})
-                    if args.cnn_feature_dir is not None:
-                        inputs.update({'visual_feature': batch[-4]})
             if args.model_type == 'markuplm':
                 inputs.update({
                     'xpath_tags_seq': batch[5],
                     'xpath_subs_seq': batch[6],
                 })
-                if args.add_xpath:
-                    inputs.update({
-                        'xpath_tags_seq_tag': batch[7],
-                        'xpath_subs_seq_tag': batch[8],
-                    })
                 del inputs['token_type_ids']
             if args.model_type == 'roberta':
                 del inputs['token_type_ids']
@@ -336,13 +301,6 @@ def evaluate(args, model, tokenizer, prefix="", write_pred=True):
                           )
             else:
                 if args.provided_tag_pred is not None:
-                    # if examples[eval_feature.example_index].qas_id in selected_qa:
-                    #     selected_results.append({'unique_id': examples[eval_feature.example_index].qas_id,
-                    #                              'logits': [to_list(o[i]) for o in outputs.hidden_states],
-                    #                              'start_logits': to_list(outputs.start_logits[i]),
-                    #                              'end_logits': to_list(outputs.end_logits[i]),
-                    #                              'tokens': eval_feature.tokens,
-                    #                              'index': feature_index.item()})
                     result = RawResult(unique_id=unique_id,
                                        start_logits=to_list(outputs[0][i]),
                                        end_logits=to_list(outputs[1][i]))
@@ -350,8 +308,6 @@ def evaluate(args, model, tokenizer, prefix="", write_pred=True):
                     result = RawTagResult(unique_id=unique_id,
                                           tag_logits=to_list(outputs[0][i]))
             all_results.append(result)
-    # with open('selected_logits_all_{}.json'.format(args.per_gpu_eval_batch_size), 'w') as o:
-    #     json.dump(selected_results, o, indent=2)
 
     eval_time = timeit.default_timer() - start_time
     logger.info("  Evaluation done in total %f secs (%f sec per example)", eval_time, eval_time / len(dataset))
@@ -363,30 +319,25 @@ def evaluate(args, model, tokenizer, prefix="", write_pred=True):
     output_result_file = os.path.join(args.output_dir, "qas_eval_results_{}.json".format(prefix))
     output_file = os.path.join(args.output_dir, "eval_matrix_results_{}".format(prefix))
 
-    if args.simplify:
-        tag_mapping = json.load(open('data/mapping.json'))
-    else:
-        tag_mapping = None
-
     if args.merge is not None:
         returns, _ = write_tag_predictions(examples, features,
                                            [r[1] for r in all_results], 1, args.model_type, output_tag_prediction_file,
-                                           output_nbest_file, write_pred=False, qm=args.question_mode == 4)
+                                           output_nbest_file, write_pred=False)
         returns = write_predictions_provided_tag(examples, features,
                                                  [r[0] for r in all_results], args.n_best_size,
                                                  args.max_answer_length, args.do_lower_case, output_prediction_file,
                                                  returns, output_tag_prediction_file, output_nbest_file,
-                                                 args.verbose_logging, write_pred=write_pred, tag_mapping=tag_mapping)
+                                                 args.verbose_logging, write_pred=write_pred)
     else:
         if args.provided_tag_pred is not None:
             returns = write_predictions_provided_tag(examples, features, all_results, args.n_best_size,
                                                      args.max_answer_length, args.do_lower_case, output_prediction_file,
-                                                     args.provided_tag_pred, output_tag_prediction_file, output_nbest_file,
-                                                     args.verbose_logging, write_pred=write_pred, tag_mapping=tag_mapping)
+                                                     args.provided_tag_pred, output_tag_prediction_file,
+                                                     output_nbest_file, args.verbose_logging, write_pred=write_pred)
         else:
             # TODO n best tag size greater than 1
-            returns = write_tag_predictions(examples, features, all_results, 1, args.model_type, output_tag_prediction_file,
-                                            output_nbest_file, write_pred=write_pred, qm=args.question_mode == 4)
+            returns = write_tag_predictions(examples, features, all_results, 1, args.model_type,
+                                            output_tag_prediction_file, output_nbest_file, write_pred=write_pred)
             output_prediction_file = None
 
     if not write_pred:
@@ -397,8 +348,7 @@ def evaluate(args, model, tokenizer, prefix="", write_pred=True):
                                  pred_file=output_prediction_file,
                                  tag_pred_file=output_tag_prediction_file,
                                  result_file=output_result_file if write_pred else None,
-                                 out_file=output_file,
-                                 tag_mapping=tag_mapping if args.provided_tag_pred is None else None)
+                                 out_file=output_file)
     results = evaluate_on_squad(evaluate_options)
     return results
 
@@ -410,28 +360,14 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
 
     # Load data features from cache or dataset file
     input_file = args.predict_file if evaluate else args.train_file
-    base_cached_features_file = os.path.join(os.path.dirname(input_file), 'cached', '{}_{}_{}_{}'.format(
-        'cached' if not args.slice_cache or evaluate else 'slice',
+    cached_features_file = os.path.join(os.path.dirname(input_file), 'cached', 'cached_{}_{}_{}'.format(
         split,
         list(filter(None, args.model_name_or_path.split('/'))).pop().split('_')[0],
         str(args.max_seq_length)))
-    cached_features_file = '{}_{}'.format(base_cached_features_file,
-                                          args.loss_method if 'soft' not in args.loss_method
-                                          else '{}_{}'.format(args.soft_remain, args.soft_decay))
-    if args.add_xpath:
-        cached_features_file += '_X'
-    if args.simplify:
-        cached_features_file += '_S'
-    if args.all_positive:
-        cached_features_file += '_P'
-    if args.temp:
-        cached_features_file += '_T'
 
     if os.path.exists(cached_features_file) and not args.overwrite_cache and not args.enforce:
         logger.info("Loading features from cached file %s", cached_features_file)
-        if args.slice_cache:
-            offsets = json.load(open(cached_features_file + '_offsets'))
-        elif args.separate_read is not None and not evaluate:
+        if args.separate_read is not None and not evaluate:
             total = torch.load(cached_features_file + '_total')
             features = None
         else:
@@ -440,8 +376,6 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
                                                  is_training=not evaluate,
                                                  tokenizer=tokenizer,
                                                  base_mode=args.model_type,
-                                                 simplify_html=args.simplify,
-                                                 use_t=args.temp,
                                                  simplify=False if evaluate else True)
         if not evaluate:
             tag_list = list(tag_list)
@@ -456,8 +390,6 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
                                                      is_training=not evaluate,
                                                      tokenizer=tokenizer,
                                                      base_mode=args.model_type,
-                                                     simplify_html=args.simplify,
-                                                     use_t=args.temp,
                                                      simplify=True)
             tag_list = list(tag_list)
             tag_list.sort()
@@ -467,74 +399,38 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
                                           is_training=not evaluate,
                                           tokenizer=tokenizer,
                                           base_mode=args.model_type,
-                                          simplify_html=args.simplify,
-                                          use_t=args.temp,
                                           simplify=False,
                                           sample_size=args.sample_size if args.enforce else None)
 
         features = convert_examples_to_features(examples=examples,
                                                 tokenizer=tokenizer,
-                                                loss_method=args.loss_method,
                                                 max_seq_length=args.max_seq_length,
                                                 doc_stride=args.doc_stride,
                                                 max_query_length=args.max_query_length,
                                                 max_tag_length=args.max_tag_length,
-                                                soft_remain=args.soft_remain,
-                                                soft_decay=args.soft_decay,
                                                 is_training=not evaluate,
                                                 cls_token=tokenizer.cls_token,
                                                 sep_token=tokenizer.sep_token,
                                                 pad_token=tokenizer.pad_token_id,)
-        if args.all_positive:
-            features = [f for f in features if not f.is_impossible]
         if args.local_rank in [-1, 0] and not args.enforce:
             logger.info("Saving features into cached file %s", cached_features_file)
-            if args.slice_cache and not evaluate:
-                offsets = []
-                with open(cached_features_file, 'w') as w:
-                    for f in features:
-                        offsets.append(w.tell())
-                        w.write(f.to_json() + '\n')
-                json.dump(offsets, open(cached_features_file + '_offsets', 'w'))
-            else:
-                torch.save(features, cached_features_file)
-                if args.separate_read is not None and not evaluate:
-                    random.shuffle(features)
-                    total = len(features)
-                    num = ((total // 64) // args.separate_read) * 64
-                    for i in range(args.separate_read - 1):
-                        torch.save(features[i * num:(i + 1) * num], cached_features_file + '_sub_{}'.format(i + 1))
-                    torch.save(features[(args.separate_read - 1) * num:],
-                               cached_features_file + '_sub_{}'.format(args.separate_read))
-                    # torch.save(features[num:], cached_features_file + '_sub2')
-                    torch.save(total, cached_features_file + '_total')
+            torch.save(features, cached_features_file)
+            if args.separate_read is not None and not evaluate:
+                random.shuffle(features)
+                total = len(features)
+                num = ((total // 64) // args.separate_read) * 64
+                for i in range(args.separate_read - 1):
+                    torch.save(features[i * num:(i + 1) * num], cached_features_file + '_sub_{}'.format(i + 1))
+                torch.save(features[(args.separate_read - 1) * num:],
+                           cached_features_file + '_sub_{}'.format(args.separate_read))
+                # torch.save(features[num:], cached_features_file + '_sub2')
+                torch.save(total, cached_features_file + '_total')
 
     if args.local_rank == 0 and not evaluate:
         torch.distributed.barrier()  # Make sure only the first process in distributed training process the dataset,
         # and the others will use the cache
 
-    if args.resave:
-        random.shuffle(features)
-        total = len(features)
-        num = ((total // 64) // args.separate_read) * 64
-        for i in range(args.separate_read - 1):
-            torch.save(features[i * num:(i + 1) * num], cached_features_file + '_sub_{}'.format(i + 1))
-        torch.save(features[(args.separate_read - 1) * num:],
-                   cached_features_file + '_sub_{}'.format(args.separate_read))
-        # torch.save(features[num:], cached_features_file + '_sub2')
-        torch.save(total, cached_features_file + '_total')
-        raise SystemError('Mission complete!')
-
-    if args.slice_cache and not evaluate:
-        all_html_trees = [e.html_tree for e in examples]
-        dataset = SliceDataset(file=cached_features_file, offsets=offsets, html_trees=all_html_trees,
-                               shape=(args.max_tag_length, args.max_seq_length),
-                               training=True, mask_method=args.mask_method,
-                               mask_dir=os.path.dirname(input_file),
-                               separate=args.separate_mask, cnn_feature_dir=args.cnn_feature_dir,
-                               direction=args.direction, loss_method=args.loss_method)
-        return dataset
-    elif args.separate_read is not None and not evaluate:
+    if args.separate_read is not None and not evaluate:
         dataset = SubDataset(examples, evaluate, total, cached_features_file, args)
         return dataset
 
@@ -544,7 +440,6 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
     all_segment_ids = torch.tensor([f.segment_ids for f in features], dtype=torch.long)
     all_tag_depth = torch.tensor([f.depth for f in features], dtype=torch.long)
     all_app_tags = [f.app_tags for f in features]
-    # all_tag_lists = torch.tensor([f.tag_list for f in features], dtype=torch.long)
     all_example_index = [f.example_index for f in features]
     all_html_trees = [e.html_tree for e in examples]
     all_base_index = [f.base_index for f in features]
@@ -553,25 +448,17 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
     if args.model_type == 'markuplm':
         all_xpath_tags_seq = torch.tensor([f.xpath_tags_seq for f in features], dtype=torch.long)
         all_xpath_subs_seq = torch.tensor([f.xpath_subs_seq for f in features], dtype=torch.long)
-        if args.add_xpath:
-            all_xpath_tags_seq_tag = torch.tensor([f.xpath_tags_seq_tag for f in features], dtype=torch.long)
-            all_xpath_subs_seq_tag = torch.tensor([f.xpath_subs_seq_tag for f in features], dtype=torch.long)
-        else:
-            all_xpath_tags_seq_tag, all_xpath_subs_seq_tag = None, None
     else:
-        all_xpath_tags_seq, all_xpath_subs_seq, all_xpath_tags_seq_tag, all_xpath_subs_seq_tag = None, None, None, None
+        all_xpath_tags_seq, all_xpath_subs_seq,  = None, None
 
     if evaluate:
         all_feature_index = torch.arange(all_input_ids.size(0), dtype=torch.long)
         dataset = StrucDataset(all_input_ids, all_input_mask, all_segment_ids, all_feature_index, all_tag_depth,
-                               all_xpath_tags_seq, all_xpath_subs_seq, all_xpath_tags_seq_tag, all_xpath_subs_seq_tag,
-                               # tag_list=all_tag_lists,
+                               all_xpath_tags_seq, all_xpath_subs_seq,
                                gat_mask=(all_app_tags, all_example_index, all_html_trees), base_index=all_base_index,
                                tag2tok=all_tag_to_token, shape=(args.max_tag_length, args.max_seq_length),
                                training=False, page_id=all_page_id, mask_method=args.mask_method,
-                               mask_dir=os.path.dirname(input_file),
-                               separate=args.separate_mask, cnn_feature_dir=args.cnn_feature_dir,
-                               direction=args.direction, simplify=args.simplify, question_mode=args.question_mode)
+                               mask_dir=os.path.dirname(input_file), direction=args.direction)
     else:
         all_answer_tid = torch.tensor([f.answer_tid for f in features],
                                       dtype=torch.long if 'base' in args.loss_method else torch.float)
@@ -581,15 +468,11 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
         else:
             all_start_positions, all_end_positions = None, None
         dataset = StrucDataset(all_input_ids, all_input_mask, all_segment_ids, all_answer_tid, all_tag_depth,
-                               all_xpath_tags_seq, all_xpath_subs_seq, all_xpath_tags_seq_tag, all_xpath_subs_seq_tag,
-                               all_start_positions, all_end_positions,
-                               # tag_list=all_tag_lists,
+                               all_xpath_tags_seq, all_xpath_subs_seq, all_start_positions, all_end_positions,
                                gat_mask=(all_app_tags, all_example_index, all_html_trees), base_index=all_base_index,
                                tag2tok=all_tag_to_token, shape=(args.max_tag_length, args.max_seq_length),
                                training=True, page_id=all_page_id, mask_method=args.mask_method,
-                               mask_dir=os.path.dirname(input_file),
-                               separate=args.separate_mask, cnn_feature_dir=args.cnn_feature_dir,
-                               direction=args.direction, simplify=args.simplify, question_mode=args.question_mode)
+                               mask_dir=os.path.dirname(input_file), direction=args.direction)
 
     if evaluate:
         dataset = (dataset, examples, features)
@@ -698,7 +581,6 @@ def main():
     parser.add_argument('--server_ip', type=str, default='', help="Can be used for distant debugging.")
     parser.add_argument('--server_port', type=str, default='', help="Can be used for distant debugging.")
 
-    parser.add_argument('--method', type=str, default="init_direct", choices=['base', 'init_direct'])
     parser.add_argument('--enforce', action='store_true')
     parser.add_argument('--sample_size', type=int, default=None)
     parser.add_argument('--max_tag_length', type=int, default=384)
@@ -707,32 +589,13 @@ def main():
     parser.add_argument('--num_node_block', type=int, default=3)
 
     parser.add_argument('--separate_read', default=None, type=int)
-    parser.add_argument('--resave', action='store_true')
     parser.add_argument('--evaluate_split', type=str, default='dev', choices=['dev', 'test', 'train'])
-    parser.add_argument('--max_depth_embeddings', type=int, default=None,
-                        help='Set to the max depth embedding for node if want to use the position embeddings')
-    parser.add_argument('--loss_method', type=str, default='base', choices=['base', 'soft', 'multi-soft', 'bce-soft', 'bce-calc'])
-    parser.add_argument('--soft_remain', type=float, default=0.7)
-    parser.add_argument('--soft_decay', type=float, default=0.5)
-    parser.add_argument('--separate_mask', action='store_true')
     parser.add_argument('--provided_tag_pred', type=str, default=None)
     parser.add_argument('--mask_method', type=int, default=1,
-                        help='how the GAT implement: 0-DOM+SPA; 1-SPA; 2-DOM; 3-DOM-; 4-DOM+SEP; 5-DOM+SHA')
+                        help='how the GAT implement: 0-DOM+SPA; 1-SPA; 2-DOM; 3-DOM-')
 
-    parser.add_argument('--cnn_feature_dim', default=0, type=int)
-    parser.add_argument('--cnn_feature_dir', default=None, type=str)
-    parser.add_argument('--cnn_mode', default="none", choices=["none", "once", "each"])
     parser.add_argument('--direction', default='b', choices=['b', 'v', 'h'])
     parser.add_argument('--load_epoch', action='store_true')
-    parser.add_argument('--slice_cache', action='store_true')
-    parser.add_argument('--base_lr', default=None, type=float)
-    parser.add_argument('--num_workers', default=0, type=int)
-    parser.add_argument('--add_xpath', action='store_true')
-    parser.add_argument('--temp', action='store_true')
-    parser.add_argument('--max_rel_position_embeddings', default=12, type=int)
-    parser.add_argument('--simplify', action='store_true')
-    parser.add_argument('--all_positive', action='store_true')
-    parser.add_argument('--question_mode', default=0, type=int)
     parser.add_argument('--merge', default=None, type=float)
     args = parser.parse_args()
 

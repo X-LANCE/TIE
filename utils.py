@@ -118,9 +118,7 @@ class InputFeatures(object):
                  base_index=None,
                  is_impossible=None,
                  xpath_tags_seq=None,
-                 xpath_subs_seq=None,
-                 xpath_tags_seq_tag=None,
-                 xpath_subs_seq_tag=None,):
+                 xpath_subs_seq=None,):
         self.unique_id = unique_id
         self.page_id = page_id
         self.example_index = example_index
@@ -144,8 +142,6 @@ class InputFeatures(object):
         self.is_impossible = is_impossible
         self.xpath_tags_seq = xpath_tags_seq
         self.xpath_subs_seq = xpath_subs_seq
-        self.xpath_tags_seq_tag = xpath_tags_seq_tag
-        self.xpath_subs_seq_tag = xpath_subs_seq_tag
 
     def to_json(self):
         return json.dumps(self.__dict__)
@@ -238,8 +234,7 @@ def get_xpath_and_treeid4tokens(html_code, unique_tids, max_depth):
     return xpath_tag_map, xpath_subs_map
 
 
-def read_squad_examples(input_file, is_training, tokenizer, base_mode, max_depth=50,
-                        sample_size=None, simplify_html=False, simplify=False, use_t=False):
+def read_squad_examples(input_file, is_training, tokenizer, base_mode, max_depth=50, sample_size=None, simplify=False):
     """Read a SQuAD json file into a list of SquadExample."""
     with open(input_file, "r", encoding='utf-8') as reader:
         input_data = json.load(reader)["data"]
@@ -388,14 +383,6 @@ def read_squad_examples(input_file, is_training, tokenizer, base_mode, max_depth
         tag_depth += [2, 2]
         return tag_depth
 
-    # def check_for_index(t2w, token, h):
-    #     for ind in range(len(t2w) - 2):
-    #         e = h.find(tid=ind)
-    #         raw = ' '.join([s.strip() for s in e.strings if s.strip()])
-    #         content = token[t2w[ind]['start']:t2w[ind]['end'] + 1]
-    #         content = ' '.join([s for s in content if s[0] != '<' or s[-1] != '>'])
-    #         assert content == raw, 'Not the same in {}\n{}\n{}\n{}'.format(ind, h, content, raw)
-
     examples = []
     all_tag_list = set()
     for entry in input_data:
@@ -405,10 +392,7 @@ def read_squad_examples(input_file, is_training, tokenizer, base_mode, max_depth
             # Generate Doc Tokens
             page_id = website["page_id"]
             curr_dir = osp.join(osp.dirname(input_file), domain, page_id[0:2], 'processed_data')
-            if simplify_html:
-                html_file = open(osp.join(curr_dir, page_id + '.simp')).read()
-            else:
-                html_file = open(osp.join(curr_dir, page_id + '.html')).read()
+            html_file = open(osp.join(curr_dir, page_id + '.html')).read()
             html_code = bs(html_file)
 
             raw_text_list, tag_num = html_to_text_list(html_code)
@@ -431,7 +415,7 @@ def read_squad_examples(input_file, is_training, tokenizer, base_mode, max_depth
             doc_tokens.append('yes')
             char_to_word_offset.append(len(doc_tokens) - 1)
 
-            if base_mode != 'markuplm' and not use_t:
+            if base_mode != 'markuplm':
                 real_text, tag_list = html_to_text(bs(html_file))
                 all_tag_list = all_tag_list | tag_list
                 char_to_word_offset = adjust_offset(char_to_word_offset, real_text)
@@ -466,7 +450,7 @@ def read_squad_examples(input_file, is_training, tokenizer, base_mode, max_depth
                         all_doc_tokens.append(sub_token)
 
                 # Generate extra information for features
-                if base_mode != 'markuplm' and not use_t:
+                if base_mode != 'markuplm':
                     tok_to_tags_index, tags_to_tok_index, orig_tags = word_to_tag_from_text(all_doc_tokens,
                                                                                             bs(html_file))
                     xpath_tag_map, xpath_subs_map = None, None
@@ -475,13 +459,9 @@ def read_squad_examples(input_file, is_training, tokenizer, base_mode, max_depth
                                                                                             html_code,
                                                                                             tok_to_orig_index,
                                                                                             orig_to_tok_index)
-
-                    if base_mode == 'markuplm':
-                        xpath_tag_map, xpath_subs_map = get_xpath_and_treeid4tokens(html_code,
-                                                                                    unique_tids,
-                                                                                    max_depth=max_depth)
-                    else:
-                        xpath_tag_map, xpath_subs_map = None, None
+                    xpath_tag_map, xpath_subs_map = get_xpath_and_treeid4tokens(html_code,
+                                                                                unique_tids,
+                                                                                max_depth=max_depth)
 
                 assert tok_to_tags_index[-1] == tag_num - 1, (tok_to_tags_index[-1], tag_num - 1)
                 # check_for_index(tags_to_tok_index, all_doc_tokens, bs(html_file))
@@ -555,40 +535,13 @@ def read_squad_examples(input_file, is_training, tokenizer, base_mode, max_depth
     return examples, all_tag_list
 
 
-def convert_examples_to_features(examples, tokenizer, loss_method, max_seq_length, max_tag_length,
-                                 doc_stride, max_query_length, is_training, soft_remain, soft_decay,
+def convert_examples_to_features(examples, tokenizer, max_seq_length, max_tag_length,
+                                 doc_stride, max_query_length, is_training,
                                  cls_token='[CLS]', sep_token='[SEP]', pad_token=0,
                                  sequence_a_segment_id=0, sequence_b_segment_id=1,
                                  cls_token_segment_id=0, pad_token_segment_id=0,
                                  max_depth=50):
     """Loads a data file into a list of `InputBatch`s."""
-
-    def label_generating(html_tree, origin_answer_tid, app_tags, base):
-        if loss_method == 'base' or not is_training:
-            return origin_answer_tid
-        t, path = 1, [origin_answer_tid]
-        marker = np.zeros(max_tag_length, dtype=np.float)
-        marker[origin_answer_tid] = t
-        if origin_answer_tid != 0:
-            tag = html_tree.find(tid=app_tags[origin_answer_tid - base])
-            if tag is None:
-                marker[origin_answer_tid] = soft_remain
-                marker[base] = 1 - soft_remain
-                path.append(base)
-            else:
-                for p in tag.parents:
-                    if type(p) == bs4.BeautifulSoup:
-                        break
-                    if int(p['tid']) in app_tags:
-                        path.append(app_tags.index(int(p['tid'])) + base)
-                        marker[app_tags.index(int(p['tid'])) + base] = t
-                        t *= soft_decay
-                temp = marker.sum() - 1
-                if temp != 0:
-                    marker[origin_answer_tid] = temp * soft_remain / (1 - soft_remain)
-                    marker /= marker.sum()
-        answer_tid = marker.tolist()
-        return answer_tid
 
     unique_id = 1000000000
     features = []
@@ -766,11 +719,8 @@ def convert_examples_to_features(examples, tokenizer, loss_method, max_seq_lengt
             if xpath_tag_map is not None:
                 xpath_tags_seq = [xpath_tag_map.get(tid, pad_x_tag_seq) for tid in token_to_tag_index]  # ok
                 xpath_subs_seq = [xpath_subs_map.get(tid, pad_x_subs_seq) for tid in token_to_tag_index]  # ok
-                xpath_tags_seq_tag = [xpath_tag_map.get(tid, pad_x_tag_seq) for tid in tag_list]  # ok
-                xpath_subs_seq_tag = [xpath_subs_map.get(tid, pad_x_subs_seq) for tid in tag_list]  # ok
             else:
-                xpath_tags_seq, xpath_subs_seq, xpath_tags_seq_tag, xpath_subs_seq_tag = None, None, None, None
-            answer_tid = label_generating(example.html_tree, answer_tid, app_tags, base)
+                xpath_tags_seq, xpath_subs_seq = None, None
             features.append(
                 InputFeatures(
                     unique_id=unique_id,
@@ -796,8 +746,6 @@ def convert_examples_to_features(examples, tokenizer, loss_method, max_seq_lengt
                     is_impossible=span_is_impossible,
                     xpath_tags_seq=xpath_tags_seq,
                     xpath_subs_seq=xpath_subs_seq,
-                    xpath_tags_seq_tag=xpath_tags_seq_tag,
-                    xpath_subs_seq_tag=xpath_subs_seq_tag,
                 ))
             unique_id += 1
 
@@ -882,7 +830,7 @@ RawTagResult = collections.namedtuple("RawResult", ["unique_id", "tag_logits"])
 
 
 def write_tag_predictions(all_examples, all_features, all_results, n_best_tag_size, model_name,
-                          output_tag_prediction_file, output_nbest_file, write_pred, qm):
+                          output_tag_prediction_file, output_nbest_file, write_pred):
     logger.info("Writing tag predictions to: %s" % output_tag_prediction_file)
 
     example_index_to_features = collections.defaultdict(list)
@@ -906,11 +854,8 @@ def write_tag_predictions(all_examples, all_features, all_results, n_best_tag_si
         prelim_predictions = []
         for (feature_index, feature) in enumerate(features):
             result = unique_id_to_result[feature.unique_id]
-            if qm:
-                possible_values = [ind for ind in range(3, 3 + len(feature.app_tags))]
-            else:
-                possible_values = [ind for ind in range(feature.base_index,
-                                                        feature.base_index + len(feature.app_tags))]
+            possible_values = [ind for ind in range(feature.base_index,
+                                                    feature.base_index + len(feature.app_tags))]
             if model_name != 'markuplm':
                 possible_values = [ind for ind in possible_values
                                    if feature.tag_to_token_index[ind][1] - feature.tag_to_token_index[ind][0] > 1 or
@@ -921,10 +866,7 @@ def write_tag_predictions(all_examples, all_features, all_results, n_best_tag_si
                 if tag_index == 0:
                     continue
                 tag_logit = result.tag_logits[tag_index]
-                if qm:
-                    tag_id = feature.app_tags[tag_index - 3]
-                else:
-                    tag_id = feature.app_tags[tag_index - feature.base_index]
+                tag_id = feature.app_tags[tag_index - feature.base_index]
                 prelim_predictions.append(
                     _PrelimPrediction(
                         feature_index=feature_index,
@@ -995,7 +937,7 @@ RawResult = collections.namedtuple("RawResult", ["unique_id", "start_logits", "e
 def write_predictions_provided_tag(all_examples, all_features, all_results, n_best_size, max_answer_length,
                                    do_lower_case, output_prediction_file, input_tag_prediction_file,
                                    output_refined_tag_prediction_file, output_nbest_file, verbose_logging,
-                                   write_pred, tag_mapping):
+                                   write_pred):
     logger.info("Writing predictions to: %s" % output_prediction_file)
     logger.info("Writing nbest to: %s" % output_nbest_file)
 
@@ -1064,8 +1006,6 @@ def write_predictions_provided_tag(all_examples, all_features, all_results, n_be
                         tag_ids = _get_tag_id(feature.tag_to_token_index,
                                               start_index, end_index,
                                               feature.base_index, feature.app_tags)
-                        if tag_mapping is not None:
-                            tag_ids = tag_mapping[feature.page_id][tag_ids]
                         prelim_predictions.append(
                             _PrelimPrediction(
                                 feature_index=feature_index,
@@ -1314,7 +1254,7 @@ def _compute_softmax(scores):
     return probs
 
 
-def form_tree_mask(app, tree, separate=False, accelerate=True):
+def form_tree_mask(app, tree, accelerate=True):
     def _unit(node):
         for ch in node.contents:
             if type(ch) != bs4.element.Tag:
@@ -1327,44 +1267,25 @@ def form_tree_mask(app, tree, separate=False, accelerate=True):
                 children[path[-1], curr] = 1
             if accelerate:
                 for par in path:
-                    if separate:
-                        adj_up[curr, par] = 1
-                        adj_down[par, curr] = 1
-                    else:
-                        adj[par, curr] = 1
-                        adj[curr, par] = 1
+                    adj[par, curr] = 1
+                    adj[curr, par] = 1
             else:
                 if len(path) > 0:
-                    if separate:
-                        adj_up[curr, path[-1]] = 1
-                        adj_down[path[-1], curr] = 1
-                    else:
-                        adj[path[-1], curr] = 1
-                        adj[curr, path[-1]] = 1
+                    adj[path[-1], curr] = 1
+                    adj[curr, path[-1]] = 1
             path.append(curr)
             _unit(ch)
             path.pop()
 
     path = []
     children = np.zeros((len(app), len(app)), dtype=np.int)
-    if separate:
-        adj_up = np.zeros((len(app), len(app)), dtype=np.int)
-        adj_down = np.zeros((len(app), len(app)), dtype=np.int)
-        ind = np.diag_indices_from(adj_up)
-        adj_up[ind] = 1
-        adj_down[ind] = 1
-        adj_up[:, 0] = 1
-        adj_down[0] = 1
-        _unit(tree)
-        return adj_up, adj_down, children
-    else:
-        adj = np.zeros((len(app), len(app)), dtype=np.int)
-        ind = np.diag_indices_from(adj)
-        adj[0] = 1
-        adj[:, 0] = 1
-        adj[ind] = 1
-        _unit(tree)
-        return adj, children
+    adj = np.zeros((len(app), len(app)), dtype=np.int)
+    ind = np.diag_indices_from(adj)
+    adj[0] = 1
+    adj[:, 0] = 1
+    adj[ind] = 1
+    _unit(tree)
+    return adj, children
 
 
 def form_spatial_mask(app, rel, direction='b'):
