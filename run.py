@@ -42,7 +42,7 @@ from transformers import (
 from markuplmft.models.markuplm import MarkupLMConfig, MarkupLMTokenizer, MarkupLMForQuestionAnswering
 
 from model import TIEConfig, TIE
-from dataset import StrucDataset, SubDataset, SliceDataset
+from dataset import StrucDataset, SubDataset
 from utils import read_squad_examples, convert_examples_to_features, RawResult, RawTagResult,\
     write_tag_predictions, write_predictions_provided_tag
 from utils_evaluate import EVAL_OPTS, main as evaluate_on_squad
