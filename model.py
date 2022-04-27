@@ -20,7 +20,6 @@ class TIEConfig(PretrainedConfig):
             self.ptm_model_type = args.model_type
             self.ptm_name_or_path = args.model_name_or_path
             self.num_gat_layers = args.num_node_block
-            self.max_depth_embeddings = args.max_depth_embeddings
             self.mask_method = args.mask_method
             self.direction = args.direction
             self.name_or_path = args.model_name_or_path
@@ -30,11 +29,8 @@ class TIEConfig(PretrainedConfig):
 class HTMLBasedPooling(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.add_position_embeddings = True if config.max_depth_embeddings is not None else False
         self.sequential_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
         self.register_buffer("sequential_ids", torch.arange(config.max_position_embeddings).expand((1, -1)))
-        if self.add_position_embeddings:
-            self.depth_embeddings = nn.Embedding(config.max_depth_embeddings, config.hidden_size, padding_idx=0)
 
     def forward(self, inputs, tag_to_token, tag_depth):
         assert tag_to_token.dim() == 3
@@ -44,9 +40,6 @@ class HTMLBasedPooling(nn.Module):
         sequential_ids = self.sequential_ids[:, :outputs.size(1)]
         sequential_embeddings = self.sequential_embeddings(sequential_ids)
         outputs = outputs + sequential_embeddings
-        if self.add_position_embeddings:
-            depth_embeddings = self.depth_embeddings(tag_depth)
-            outputs = outputs + depth_embeddings
 
         return outputs  # , self.deduce_child(gat_mask)
 
