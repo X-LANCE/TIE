@@ -3,10 +3,85 @@
 import torch
 import torch.nn as nn
 from torch.nn import CrossEntropyLoss
-from transformers.models.bert.modeling_bert import BertPreTrainedModel, BertEncoder
+from transformers.modeling_outputs import BaseModelOutputWithPastAndCrossAttentions
+from transformers.models.bert.modeling_bert import BertPreTrainedModel, BertEncoder, BertLayer
 from transformers import PretrainedConfig, AutoConfig, AutoModelForQuestionAnswering
 
 from markuplmft import MarkupLMForQuestionAnswering
+
+
+class TIEEncoder(BertEncoder):
+    def __init__(self, config):
+        super(BertEncoder, self).__init__()
+        self.config = config
+        self.layer = nn.ModuleList([BertLayer(config) for _ in range(config.num_gat_layers)])
+        self.gradient_checkpointing = False
+
+    def forward(
+            self,
+            hidden_states,
+            attention_mask=None,
+            head_mask=None,
+            encoder_hidden_states=None,
+            encoder_attention_mask=None,
+            past_key_values=None,
+            use_cache=None,
+            output_attentions=False,
+            output_hidden_states=False,
+            return_dict=True,
+    ):
+        all_hidden_states = () if output_hidden_states else None
+        all_self_attentions = () if output_attentions else None
+        all_cross_attentions = () if output_attentions and self.config.add_cross_attention else None
+
+        next_decoder_cache = () if use_cache else None
+        for i, layer_module in enumerate(self.layer):
+            if output_hidden_states:
+                all_hidden_states = all_hidden_states + (hidden_states,)
+
+            layer_head_mask = head_mask[i] if head_mask is not None else None
+            past_key_value = past_key_values[i] if past_key_values is not None else None
+
+            layer_outputs = layer_module(
+                hidden_states,
+                attention_mask,
+                layer_head_mask,
+                encoder_hidden_states,
+                encoder_attention_mask,
+                past_key_value,
+                output_attentions,
+            )
+
+            hidden_states = layer_outputs[0]
+            if use_cache:
+                next_decoder_cache += (layer_outputs[-1],)
+            if output_attentions:
+                all_self_attentions = all_self_attentions + (layer_outputs[1],)
+                if self.config.add_cross_attention:
+                    all_cross_attentions = all_cross_attentions + (layer_outputs[2],)
+
+        if output_hidden_states:
+            all_hidden_states = all_hidden_states + (hidden_states,)
+
+        if not return_dict:
+            return tuple(
+                v
+                for v in [
+                    hidden_states,
+                    next_decoder_cache,
+                    all_hidden_states,
+                    all_self_attentions,
+                    all_cross_attentions,
+                ]
+                if v is not None
+            )
+        return BaseModelOutputWithPastAndCrossAttentions(
+            last_hidden_state=hidden_states,
+            past_key_values=next_decoder_cache,
+            hidden_states=all_hidden_states,
+            attentions=all_self_attentions,
+            cross_attentions=all_cross_attentions,
+        )
 
 
 class TIEConfig(PretrainedConfig):
@@ -32,7 +107,7 @@ class HTMLBasedPooling(nn.Module):
         self.sequential_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
         self.register_buffer("sequential_ids", torch.arange(config.max_position_embeddings).expand((1, -1)))
 
-    def forward(self, inputs, tag_to_token, tag_depth):
+    def forward(self, inputs, tag_to_token):
         assert tag_to_token.dim() == 3
         modified_tag2token = self.deduce_direct_string(tag_to_token)
         outputs = torch.matmul(modified_tag2token, inputs)
@@ -41,7 +116,7 @@ class HTMLBasedPooling(nn.Module):
         sequential_embeddings = self.sequential_embeddings(sequential_ids)
         outputs = outputs + sequential_embeddings
 
-        return outputs  # , self.deduce_child(gat_mask)
+        return outputs
 
     @staticmethod
     def deduce_direct_string(tag_to_token):
@@ -89,7 +164,7 @@ class TIE(BertPreTrainedModel):
         self.ptm = getattr(self.ptm, self.base_type)
         self.link = HTMLBasedPooling(config)
         self.num_gat_layers = config.num_gat_layers
-        self.gat = BertEncoder(config)
+        self.gat = TIEEncoder(config)
         self.gat_outputs = nn.Linear(config.hidden_size, 1)
         if self.merge:
             self.qa_outputs = self.ptm.qa_outputs
@@ -108,7 +183,6 @@ class TIE(BertPreTrainedModel):
             inputs_embeds=None,
             answer_tid=None,
             tag_to_tok=None,
-            tag_depth=None,
             xpath_tags_seq=None,
             xpath_subs_seq=None,
             start_positions=None,
@@ -140,7 +214,7 @@ class TIE(BertPreTrainedModel):
             sequence_output = outputs[0]
             outputs = outputs[2:]
 
-        gat_inputs = self.link(sequence_output, tag_to_tok, tag_depth)
+        gat_inputs = self.link(sequence_output, tag_to_tok)
 
         if self.config.num_attention_heads == 12:
             if self.mask_method == 0:
@@ -196,8 +270,6 @@ class TIE(BertPreTrainedModel):
                 end_positions.clamp_(0, ignored_index)
 
                 loss_fct = CrossEntropyLoss(ignore_index=ignored_index)
-                # print(start_positions)
-                # print(start_logits.size())
                 start_loss = loss_fct(start_logits, start_positions)
                 end_loss = loss_fct(end_logits, end_positions)
                 total_loss = (start_loss + end_loss) / 2

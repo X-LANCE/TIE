@@ -28,9 +28,6 @@ def generate_valid_points(h, r):
             continue
         if 0.0 in [r[key]['rect']['width'], r[key]['rect']['height']]:
             continue
-        # bb = r[key]['rect']
-        # x = bb['x'] + bb['width'] / 2
-        # y = bb['y'] + bb['height'] / 2
         points[key] = r[key]['rect']
     return points
 
@@ -71,12 +68,6 @@ def mask_process(args):
             if not f.endswith(args.tail + '.points.json'):
                 continue
             rect = json.load(open(os.path.join(d, f)))
-            # rect_x = json.load(open(os.path.join(d, f)))
-            # min_x, min_y = rect_x['2']['x'], rect_x[2]['y']
-            # max_x, max_y = rect_x['2']['x'] + rect_x['2']['width'], rect_x[2]['y'] + rect_x[2]['height']
-            # rect_y = deepcopy(rect_x)
-            # rect_x = sorted(rect_x.items(), key=lambda x: x[1]['x'])
-            # rect_y = sorted(rect_y.items(), key=lambda x: x[1]['y'])
             tuple_rect = list(rect.items())
             h, v = {}, {}
             l, r, u, dd = {}, {}, {}, {}

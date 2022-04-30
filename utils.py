@@ -361,7 +361,6 @@ def read_squad_examples(input_file, is_training, tokenizer, base_mode, max_depth
         unique_tids = set(range(len(tags)))
         for i in range(len(s_tok)):
             s_t.append(w_t[s_tok[i]])
-            # unique_tids.add(w_t[s_tok[i]])
         for i in t_w:
             try:
                 t_s.append({'start': tok_s[i['start']], 'end': tok_s[i['start'] + i['len']] - 1})
@@ -464,7 +463,6 @@ def read_squad_examples(input_file, is_training, tokenizer, base_mode, max_depth
                                                                                 max_depth=max_depth)
 
                 assert tok_to_tags_index[-1] == tag_num - 1, (tok_to_tags_index[-1], tag_num - 1)
-                # check_for_index(tags_to_tok_index, all_doc_tokens, bs(html_file))
 
                 # Process each qas, which is mainly calculate the answer position
                 for qa in website["qas"]:
@@ -548,9 +546,6 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length, max_tag_le
 
     for (example_index, example) in enumerate(tqdm(examples)):
 
-        # if example_index % 100 == 0:
-        #     logger.info('Converting %s/%s pos %s neg %s', example_index, len(examples), cnt_pos, cnt_neg)
-
         xpath_tag_map = example.xpath_tag_map
         xpath_subs_map = example.xpath_subs_map
 
@@ -633,13 +628,10 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length, max_tag_le
                 end = example.tags_to_tok_index[i]['end']
                 if end < doc_span.start:
                     continue
-                    # tag_to_token_index.append(None)
                 elif start >= doc_span.start + doc_span.length:
                     continue
-                    # tag_to_token_index.append(None)
                 elif start > end:
                     continue
-                    # tag_to_token_index.append(None)
                 else:
                     start = max(start, doc_span.start) - doc_span.start + len(tokens)
                     end = min(end, doc_span.start + doc_span.length - 1) - doc_span.start + len(tokens)
@@ -648,7 +640,6 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length, max_tag_le
                     tag_list.append(i)
             for ind in app_tags:
                 depth.append(example.tag_depth[ind])
-            # if len(app_tags) > max_tag_length - 4:
             if len(app_tags) > max_tag_length - len(query_tokens) - 3:
                 raise ValueError('Max tag length is not big enough to contain {}'.format(len(app_tags)))
             for i in range(doc_span.length):

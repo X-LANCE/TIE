@@ -12,17 +12,10 @@ from utils import form_tree_mask, form_spatial_mask
 class _BaseDataset(Dataset):
     def _init_spatial_mask(self, mask_dir, method):
         if method < 2:
-            suffix = '.spatial.json'
-            if self.simplify:
-                suffix = '.simp' + suffix
-            else:
-                suffix = '.html' + suffix
-        elif method > 3:
-            suffix = '.advanced.json'
+            suffix = '.html.spatial.json'
         else:
             self.spatial_mask = None
             return
-        print(suffix)
         if isinstance(mask_dir, dict):
             self.spatial_mask = mask_dir
             return
@@ -45,7 +38,6 @@ class SubDataset(_BaseDataset):
         self.base_name = base_name
         self.input_file = args.predict_file if evaluate else args.train_file
         self.args = args
-        self.simplify = args.simplify
 
         self.current_part = 1
         self.passed_index = 0
@@ -60,9 +52,7 @@ class SubDataset(_BaseDataset):
         all_input_ids = torch.tensor([f.input_ids for f in features], dtype=torch.long)
         all_input_mask = torch.tensor([f.input_mask for f in features], dtype=torch.long)
         all_segment_ids = torch.tensor([f.segment_ids for f in features], dtype=torch.long)
-        all_tag_depth = torch.tensor([f.depth for f in features], dtype=torch.long)
         all_app_tags = [f.app_tags for f in features]
-        # all_tag_lists = torch.tensor([f.tag_list for f in features], dtype=torch.long)
         all_example_index = [f.example_index for f in features]
         all_base_index = [f.base_index for f in features]
         all_tag_to_token = [f.tag_to_token_index for f in features]
@@ -77,32 +67,26 @@ class SubDataset(_BaseDataset):
         if self.evaluate:
             all_feature_index = torch.arange(all_input_ids.size(0), dtype=torch.long)
             self.dataset = StrucDataset(all_input_ids, all_input_mask, all_segment_ids, all_feature_index,
-                                        all_tag_depth, all_xpath_tags_seq, all_xpath_subs_seq,
+                                        all_xpath_tags_seq, all_xpath_subs_seq,
                                         gat_mask=(all_app_tags, all_example_index, self.all_html_trees),
-                                        base_index=all_base_index,
-                                        tag2tok=all_tag_to_token,
+                                        base_index=all_base_index, tag2tok=all_tag_to_token,
                                         shape=(self.args.max_tag_length, self.args.max_seq_length),
                                         training=False, page_id=all_page_id, mask_method=self.args.mask_method,
-                                        mask_dir=self.spatial_mask,
-                                        direction=self.args.direction)
+                                        mask_dir=self.spatial_mask, direction=self.args.direction)
         else:
-            all_answer_tid = torch.tensor([f.answer_tid for f in features],
-                                          dtype=torch.long if self.args.loss_method == 'base' else torch.float)
+            all_answer_tid = torch.tensor([f.answer_tid for f in features], dtype=torch.long)
             if self.args.merge is not None:
                 all_start_positions = torch.tensor([f.start_position for f in features], dtype=torch.long)
                 all_end_positions = torch.tensor([f.end_position for f in features], dtype=torch.long)
             else:
                 all_start_positions, all_end_positions = None, None
-            self.dataset = StrucDataset(all_input_ids, all_input_mask, all_segment_ids, all_answer_tid, all_tag_depth,
-                                        all_xpath_tags_seq, all_xpath_subs_seq,
-                                        all_start_positions, all_end_positions,
+            self.dataset = StrucDataset(all_input_ids, all_input_mask, all_segment_ids, all_answer_tid,
+                                        all_xpath_tags_seq, all_xpath_subs_seq, all_start_positions, all_end_positions,
                                         gat_mask=(all_app_tags, all_example_index, self.all_html_trees),
-                                        base_index=all_base_index,
-                                        tag2tok=all_tag_to_token,
+                                        base_index=all_base_index, tag2tok=all_tag_to_token,
                                         shape=(self.args.max_tag_length, self.args.max_seq_length),
                                         training=True, page_id=all_page_id, mask_method=self.args.mask_method,
-                                        mask_dir=self.spatial_mask,
-                                        direction=self.args.direction)
+                                        mask_dir=self.spatial_mask, direction=self.args.direction)
 
     def __getitem__(self, index):
         if index - self.passed_index < 0:

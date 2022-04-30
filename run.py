@@ -18,7 +18,6 @@
 from __future__ import absolute_import, division, print_function
 
 import argparse
-import json
 import logging
 import os
 import random
@@ -152,23 +151,22 @@ def train(args, train_dataset, model, tokenizer):
                       'attention_mask' : batch[1],
                       'token_type_ids' : batch[2],
                       'answer_tid'     : batch[3],
-                      'tag_depth'      : batch[4],
                       'dom_mask'       : batch[-2],
                       'tag_to_tok'     : batch[-1]}
             if args.mask_method < 2:
                 inputs.update({'spa_mask' : batch[-3]})
             if args.model_type == 'markuplm':
                 inputs.update({
-                    'xpath_tags_seq': batch[5],
-                    'xpath_subs_seq': batch[6],
+                    'xpath_tags_seq': batch[4],
+                    'xpath_subs_seq': batch[5],
                 })
                 del inputs['token_type_ids']
             if args.model_type == 'roberta':
                 del inputs['token_type_ids']
             if args.merge is not None:
                 inputs.update({
-                    'start_positions': batch[7],
-                    'end_positions': batch[8],
+                    'start_positions': batch[6],
+                    'end_positions': batch[7],
                 })
             outputs = model(**inputs)
             loss = outputs[0]
@@ -272,22 +270,20 @@ def evaluate(args, model, tokenizer, prefix="", write_pred=True):
                 inputs = {'input_ids'      : batch[0],
                           'attention_mask' : batch[1],
                           'token_type_ids' : batch[2],
-                          'tag_depth'      : batch[4],
                           'dom_mask'       : batch[-2],
                           'tag_to_tok'     : batch[-1]}
                 if args.mask_method < 2:
                     inputs.update({'spa_mask': batch[-3]})
             if args.model_type == 'markuplm':
                 inputs.update({
-                    'xpath_tags_seq': batch[5],
-                    'xpath_subs_seq': batch[6],
+                    'xpath_tags_seq': batch[4],
+                    'xpath_subs_seq': batch[5],
                 })
                 del inputs['token_type_ids']
             if args.model_type == 'roberta':
                 del inputs['token_type_ids']
             feature_indices = batch[3]
             outputs = model(**inputs)
-            # outputs = model(**inputs, output_hidden_states=True, return_dict=True)
 
         for i, feature_index in enumerate(feature_indices):
             eval_feature = features[feature_index.item()]
@@ -335,7 +331,6 @@ def evaluate(args, model, tokenizer, prefix="", write_pred=True):
                                                      args.provided_tag_pred, output_tag_prediction_file,
                                                      output_nbest_file, args.verbose_logging, write_pred=write_pred)
         else:
-            # TODO n best tag size greater than 1
             returns = write_tag_predictions(examples, features, all_results, 1, args.model_type,
                                             output_tag_prediction_file, output_nbest_file, write_pred=write_pred)
             output_prediction_file = None
@@ -423,7 +418,6 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
                     torch.save(features[i * num:(i + 1) * num], cached_features_file + '_sub_{}'.format(i + 1))
                 torch.save(features[(args.separate_read - 1) * num:],
                            cached_features_file + '_sub_{}'.format(args.separate_read))
-                # torch.save(features[num:], cached_features_file + '_sub2')
                 torch.save(total, cached_features_file + '_total')
 
     if args.local_rank == 0 and not evaluate:
@@ -438,7 +432,6 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
     all_input_ids = torch.tensor([f.input_ids for f in features], dtype=torch.long)
     all_input_mask = torch.tensor([f.input_mask for f in features], dtype=torch.long)
     all_segment_ids = torch.tensor([f.segment_ids for f in features], dtype=torch.long)
-    all_tag_depth = torch.tensor([f.depth for f in features], dtype=torch.long)
     all_app_tags = [f.app_tags for f in features]
     all_example_index = [f.example_index for f in features]
     all_html_trees = [e.html_tree for e in examples]
@@ -453,21 +446,20 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
 
     if evaluate:
         all_feature_index = torch.arange(all_input_ids.size(0), dtype=torch.long)
-        dataset = StrucDataset(all_input_ids, all_input_mask, all_segment_ids, all_feature_index, all_tag_depth,
+        dataset = StrucDataset(all_input_ids, all_input_mask, all_segment_ids, all_feature_index,
                                all_xpath_tags_seq, all_xpath_subs_seq,
                                gat_mask=(all_app_tags, all_example_index, all_html_trees), base_index=all_base_index,
                                tag2tok=all_tag_to_token, shape=(args.max_tag_length, args.max_seq_length),
                                training=False, page_id=all_page_id, mask_method=args.mask_method,
                                mask_dir=os.path.dirname(input_file), direction=args.direction)
     else:
-        all_answer_tid = torch.tensor([f.answer_tid for f in features],
-                                      dtype=torch.long if 'base' in args.loss_method else torch.float)
+        all_answer_tid = torch.tensor([f.answer_tid for f in features], dtype=torch.long)
         if args.merge is not None:
             all_start_positions = torch.tensor([f.start_position for f in features], dtype=torch.long)
             all_end_positions = torch.tensor([f.end_position for f in features], dtype=torch.long)
         else:
             all_start_positions, all_end_positions = None, None
-        dataset = StrucDataset(all_input_ids, all_input_mask, all_segment_ids, all_answer_tid, all_tag_depth,
+        dataset = StrucDataset(all_input_ids, all_input_mask, all_segment_ids, all_answer_tid,
                                all_xpath_tags_seq, all_xpath_subs_seq, all_start_positions, all_end_positions,
                                gat_mask=(all_app_tags, all_example_index, all_html_trees), base_index=all_base_index,
                                tag2tok=all_tag_to_token, shape=(args.max_tag_length, args.max_seq_length),

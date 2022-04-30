@@ -175,7 +175,7 @@ def get_raw_scores(dataset, preds, tag_preds, data_dir):
                     exact_scores[qid], coin_scores[qid] = max(compute_coin(f, t, a, t_pred, output_exact=True)
                                                               for t, a in zip(gold_tag_answers,
                                                                               additional_tag_information))
-        return exact_scores, coin_scores, coin_scores
+        return exact_scores, None, coin_scores
     exact_scores = {}
     f1_scores = {}
     coin_scores = {}
@@ -209,7 +209,7 @@ def make_eval_dict(exact_scores, f1_scores, coin_scores, qid_list=None):
         total = len(exact_scores)
         return collections.OrderedDict([
             ('exact', 100.0 * sum(exact_scores.values()) / total),
-            ('f1', 100.0 * sum(f1_scores.values()) / total),
+            ('f1', 100.0 * sum(f1_scores.values()) / total if f1_scores is not None else 'N/A'),
             ('coin', 100.0 * sum(coin_scores.values()) / total),
             ('total', total),
         ])
@@ -218,13 +218,13 @@ def make_eval_dict(exact_scores, f1_scores, coin_scores, qid_list=None):
         if total == 0:
             return collections.OrderedDict([
                 ('exact', 0),
-                ('f1', 0),
+                ('f1', 0 if f1_scores is not None else 'N/A'),
                 ('coin', 0),
                 ('total', 0),
             ])
         return collections.OrderedDict([
             ('exact', 100.0 * sum(exact_scores[k] for k in qid_list) / total),
-            ('f1', 100.0 * sum(f1_scores[k] for k in qid_list) / total),
+            ('f1', 100.0 * sum(f1_scores[k] for k in qid_list) / total  if f1_scores is not None else 'N/A'),
             ('coin', 100.0 * sum(coin_scores[k] for k in qid_list) / total),
             ('total', total),
         ])
@@ -271,7 +271,7 @@ def main(OPTS):
         with open(OPTS.result_file, 'w') as f:
             w = {}
             for k, v in qid_to_has_ans.items():
-                w[k] = {'exact': exact[k], 'f1': f1[k], 'coin': coin[k]}
+                w[k] = {'exact': exact[k], 'f1': f1[k] if f1 is not None else 'N/A', 'coin': coin[k]}
             json.dump(w, f)
     if OPTS.out_file:
         with open(OPTS.out_file, 'w') as f:
