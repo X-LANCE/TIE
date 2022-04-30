@@ -1,20 +1,3 @@
-# coding=utf-8
-# Copyright 2018 The Google AI Language Team Authors and The HuggingFace Inc. team.
-# Copyright (c) 2018, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-""" Finetuning the library models for question-answering on SQuAD (DistilBERT, Bert, XLM, XLNet)."""
-
 from __future__ import absolute_import, division, print_function
 
 import argparse
@@ -42,7 +25,7 @@ from markuplmft.models.markuplm import MarkupLMConfig, MarkupLMTokenizer, Markup
 
 from model import TIEConfig, TIE
 from dataset import StrucDataset, SubDataset
-from utils import read_squad_examples, convert_examples_to_features, RawResult, RawTagResult,\
+from utils import read_examples, convert_examples_to_features, RawResult, RawTagResult,\
     write_tag_predictions, write_predictions_provided_tag
 from utils_evaluate import EVAL_OPTS, main as evaluate_on_squad
 
@@ -360,18 +343,19 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
         list(filter(None, args.model_name_or_path.split('/'))).pop().split('_')[0],
         str(args.max_seq_length)))
 
-    if os.path.exists(cached_features_file) and not args.overwrite_cache and not args.enforce:
+    if os.path.exists(cached_features_file) and not args.overwrite_cache:
         logger.info("Loading features from cached file %s", cached_features_file)
         if args.separate_read is not None and not evaluate:
             total = torch.load(cached_features_file + '_total')
             features = None
         else:
             features = torch.load(cached_features_file)
-        examples, tag_list = read_squad_examples(input_file=input_file,
-                                                 is_training=not evaluate,
-                                                 tokenizer=tokenizer,
-                                                 base_mode=args.model_type,
-                                                 simplify=False if evaluate else True)
+        examples, tag_list = read_examples(input_file=input_file,
+                                           root_dir=args.root_dir,
+                                           is_training=not evaluate,
+                                           tokenizer=tokenizer,
+                                           base_mode=args.model_type,
+                                           simplify=False if evaluate else True)
         if not evaluate:
             tag_list = list(tag_list)
             tag_list.sort()
@@ -381,21 +365,22 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
         logger.info("Creating features from dataset file at %s", input_file)
 
         if not evaluate:
-            examples, tag_list = read_squad_examples(input_file=input_file,
-                                                     is_training=not evaluate,
-                                                     tokenizer=tokenizer,
-                                                     base_mode=args.model_type,
-                                                     simplify=True)
+            examples, tag_list = read_examples(input_file=input_file,
+                                               root_dir=args.root_dir,
+                                               is_training=not evaluate,
+                                               tokenizer=tokenizer,
+                                               base_mode=args.model_type,
+                                               simplify=True)
             tag_list = list(tag_list)
             tag_list.sort()
             tokenizer.add_tokens(tag_list)
 
-        examples, _ = read_squad_examples(input_file=input_file,
-                                          is_training=not evaluate,
-                                          tokenizer=tokenizer,
-                                          base_mode=args.model_type,
-                                          simplify=False,
-                                          sample_size=args.sample_size if args.enforce else None)
+        examples, _ = read_examples(input_file=input_file,
+                                    root_dir=args.root_dir,
+                                    is_training=not evaluate,
+                                    tokenizer=tokenizer,
+                                    base_mode=args.model_type,
+                                    simplify=False)
 
         features = convert_examples_to_features(examples=examples,
                                                 tokenizer=tokenizer,
@@ -407,7 +392,7 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
                                                 cls_token=tokenizer.cls_token,
                                                 sep_token=tokenizer.sep_token,
                                                 pad_token=tokenizer.pad_token_id,)
-        if args.local_rank in [-1, 0] and not args.enforce:
+        if args.local_rank in [-1, 0] and args.save_features:
             logger.info("Saving features into cached file %s", cached_features_file)
             torch.save(features, cached_features_file)
             if args.separate_read is not None and not evaluate:
@@ -479,6 +464,8 @@ def main():
                         help="SQuAD json for training. E.g., train-v1.1.json")
     parser.add_argument("--predict_file", default=None, type=str, required=True,
                         help="SQuAD json for predictions. E.g., dev-v1.1.json or test-v1.1.json")
+    parser.add_argument("--root_dir", default=None, type=str, required=True,
+                        help="the root directory of the raw WebSRC dataset, which contains the HTML files.")
     parser.add_argument("--model_type", default=None, type=str, required=True,
                         help="Model type selected in the bert or electra models provided by huggingface")
     parser.add_argument("--model_name_or_path", default=None, type=str, required=True,
@@ -493,6 +480,8 @@ def main():
                         help="Pretrained tokenizer name or path if not the same as model_name")
     parser.add_argument("--cache_dir", default=None, type=str,
                         help="Where do you want to store the pre-trained models downloaded from s3")
+    parser.add_argument("--do_lower_case", action='store_true',
+                        help="Set this flag if you are using an uncased model.")
 
     parser.add_argument("--max_seq_length", default=384, type=int,
                         help="The maximum total input sequence length after WordPiece tokenization. Sequences "
@@ -502,14 +491,28 @@ def main():
     parser.add_argument("--max_query_length", default=64, type=int,
                         help="The maximum number of tokens for the question. Questions longer than this will "
                              "be truncated to this length.")
+    parser.add_argument("--max_answer_length", default=30, type=int,
+                        help="The maximum length of an answer that can be generated. This is needed because the start "
+                             "and end predictions are not conditioned on one another.")
+    parser.add_argument("--verbose_logging", action='store_true',
+                        help="If true, all of the warnings related to data processing will be printed. "
+                             "A number of warnings are expected for a normal SQuAD evaluation.")
+
     parser.add_argument("--do_train", action='store_true',
                         help="Whether to run training.")
     parser.add_argument("--do_eval", action='store_true',
                         help="Whether to run eval on the dev set.")
     parser.add_argument("--evaluate_during_training", action='store_true',
                         help="Run evaluation during training at each logging step.")
-    parser.add_argument("--do_lower_case", action='store_true',
-                        help="Set this flag if you are using an uncased model.")
+    parser.add_argument("--eval_all_checkpoints", action='store_true',
+                        help="Evaluate all checkpoints starting with the same prefix as model_name ending and ending "
+                             "with step number")
+    parser.add_argument('--eval_from_checkpoint', default=0, type=int,
+                        help="Only evaluate the checkpoints with prefix larger than or equal to it, beside the final "
+                             "checkpoint with no prefix")
+    parser.add_argument('--eval_to_checkpoint', default=None, type=int,
+                        help="Only evaluate the checkpoints with prefix smaller than it, beside the final checkpoint "
+                             "with no prefix")
 
     parser.add_argument("--per_gpu_train_batch_size", default=8, type=int,
                         help="Batch size per GPU/CPU for training.")
@@ -534,32 +537,19 @@ def main():
     parser.add_argument("--n_best_size", default=20, type=int,
                         help="The total number of n-best predictions to generate in the nbest_predictions.json output "
                              "file.")
-    parser.add_argument("--max_answer_length", default=30, type=int,
-                        help="The maximum length of an answer that can be generated. This is needed because the start "
-                             "and end predictions are not conditioned on one another.")
-    parser.add_argument("--verbose_logging", action='store_true',
-                        help="If true, all of the warnings related to data processing will be printed. "
-                             "A number of warnings are expected for a normal SQuAD evaluation.")
 
     parser.add_argument('--logging_steps', type=int, default=3000,
                         help="Log every X updates steps.")
     parser.add_argument('--save_steps', type=int, default=3000,
                         help="Save checkpoint every X updates steps.")
-    parser.add_argument("--eval_all_checkpoints", action='store_true',
-                        help="Evaluate all checkpoints starting with the same prefix as model_name ending and ending "
-                             "with step number")
-    parser.add_argument('--eval_from_checkpoint', type=int, default=0,
-                        help="Only evaluate the checkpoints with prefix larger than or equal to it, beside the final "
-                             "checkpoint with no prefix")
-    parser.add_argument('--eval_to_checkpoint', type=int, default=None,
-                        help="Only evaluate the checkpoints with prefix smaller than it, beside the final checkpoint "
-                             "with no prefix")
     parser.add_argument("--no_cuda", action='store_true',
                         help="Whether not to use CUDA when available")
     parser.add_argument('--overwrite_output_dir', action='store_true',
                         help="Overwrite the content of the output directory")
     parser.add_argument('--overwrite_cache', action='store_true',
                         help="Overwrite the cached training and evaluation sets")
+    parser.add_argument('--save_features', default=True, type=bool,
+                        help="whether or not to save the processed features, default is True")
     parser.add_argument('--seed', type=int, default=42,
                         help="random seed for initialization")
 
@@ -573,12 +563,11 @@ def main():
     parser.add_argument('--server_ip', type=str, default='', help="Can be used for distant debugging.")
     parser.add_argument('--server_port', type=str, default='', help="Can be used for distant debugging.")
 
-    parser.add_argument('--enforce', action='store_true')
-    parser.add_argument('--sample_size', type=int, default=None)
-    parser.add_argument('--max_tag_length', type=int, default=384)
-
     # added parameters
     parser.add_argument('--num_node_block', type=int, default=3)
+    parser.add_argument('--max_tag_length', default=512, type=int,
+                        help="The maximum total tag length after the HTML based pooling. "
+                             "Longer than this will cause error.")
 
     parser.add_argument('--separate_read', default=None, type=int)
     parser.add_argument('--evaluate_split', type=str, default='dev', choices=['dev', 'test', 'train'])

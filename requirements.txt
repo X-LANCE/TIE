@@ -1,0 +1,7 @@
+numpy~=1.19.4
+tqdm~=4.62.3
+tensorboardX~=1.8
+transformers~=4.10.2
+beautifulsoup4~=4.10.0
+lxml~=4.3.4
+torch~=1.7.1+cu110

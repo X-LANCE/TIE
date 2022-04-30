@@ -1,20 +1,3 @@
-# coding=utf-8
-# Copyright 2018 The Google AI Language Team Authors and The HuggingFace Inc. team.
-# Copyright (c) 2018, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-""" Load SQuAD dataset. """
-
 from __future__ import absolute_import, division, print_function
 
 import json
@@ -36,7 +19,7 @@ from markuplmft.data.tag_utils import tags_dict
 logger = logging.getLogger(__name__)
 
 
-class SquadExample(object):
+class TIEExample(object):
     """
     A single training/test example for the Squad dataset.
     For examples without an answer, the start and end position are -1.
@@ -234,7 +217,8 @@ def get_xpath_and_treeid4tokens(html_code, unique_tids, max_depth):
     return xpath_tag_map, xpath_subs_map
 
 
-def read_squad_examples(input_file, is_training, tokenizer, base_mode, max_depth=50, sample_size=None, simplify=False):
+def read_examples(input_file, root_dir, is_training, tokenizer, base_mode,
+                  max_depth=50, sample_size=None, simplify=False):
     """Read a SQuAD json file into a list of SquadExample."""
     with open(input_file, "r", encoding='utf-8') as reader:
         input_data = json.load(reader)["data"]
@@ -390,7 +374,7 @@ def read_squad_examples(input_file, is_training, tokenizer, base_mode, max_depth
 
             # Generate Doc Tokens
             page_id = website["page_id"]
-            curr_dir = osp.join(osp.dirname(input_file), domain, page_id[0:2], 'processed_data')
+            curr_dir = osp.join(root_dir, domain, page_id[0:2], 'processed_data')
             html_file = open(osp.join(curr_dir, page_id + '.html')).read()
             html_code = bs(html_file)
 
@@ -430,8 +414,8 @@ def read_squad_examples(input_file, is_training, tokenizer, base_mode, max_depth
                 for qa in website["qas"]:
                     qas_id = qa["id"]
                     tag_depth = calculate_depth(html_code)
-                    example = SquadExample(doc_tokens=doc_tokens, qas_id=qas_id,
-                                           html_tree=html_code, tag_depth=tag_depth)
+                    example = TIEExample(doc_tokens=doc_tokens, qas_id=qas_id,
+                                         html_tree=html_code, tag_depth=tag_depth)
                     examples.append(example)
             else:
                 # Tokenize all doc tokens
@@ -504,7 +488,7 @@ def read_squad_examples(input_file, is_training, tokenizer, base_mode, max_depth
                                            qa['id'], actual_text, cleaned_answer_text)
                             continue
 
-                    example = SquadExample(
+                    example = TIEExample(
                         doc_tokens=doc_tokens,
                         qas_id=qas_id,
                         html_tree=html_code,

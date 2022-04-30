@@ -1,11 +1,3 @@
-""" Official evaluation script for SQuAD version 2.0.
-    Modified by XLNet authors to update `find_best_threshold` scripts for SQuAD V2.0
-
-In addition to basic functionality, we also compute additional statistics and
-plot precision-recall curves if an additional na_prob.json file is provided.
-This file is expected to map question ID's to the model's predicted probability
-that a question is unanswerable.
-"""
 import argparse
 import collections
 import json
