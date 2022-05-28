@@ -24,7 +24,7 @@ from transformers import (
 from markuplmft.models.markuplm import MarkupLMConfig, MarkupLMTokenizer, MarkupLMForQuestionAnswering
 
 from model import TIEConfig, TIE
-from dataset import StrucDataset, SubDataset
+from dataset import StrucDataset, PiecedDataset
 from utils import read_examples, convert_examples_to_features, RawResult, RawTagResult,\
     write_tag_predictions, write_predictions_provided_tag
 from utils_evaluate import EVAL_OPTS, main as evaluate_on_squad
@@ -33,6 +33,9 @@ logger = logging.getLogger(__name__)
 
 
 def set_seed(args):
+    r"""
+    Fix the random seed for reproduction.
+    """
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -48,7 +51,9 @@ def to_list(tensor):
 
 
 def train(args, train_dataset, model, tokenizer):
-    """ Train the model """
+    r"""
+    Train the model
+    """
     if args.local_rank in [-1, 0]:
         tb_writer = SummaryWriter()
 
@@ -146,15 +151,15 @@ def train(args, train_dataset, model, tokenizer):
                 del inputs['token_type_ids']
             if args.model_type == 'roberta':
                 del inputs['token_type_ids']
-            if args.merge is not None:
+            if args.merge_weight is not None:
                 inputs.update({
                     'start_positions': batch[6],
                     'end_positions': batch[7],
                 })
             outputs = model(**inputs)
             loss = outputs[0]
-            if args.merge is not None:
-                loss = args.merge * outputs[2] + loss
+            if args.merge_weight is not None:
+                loss = args.merge_weight * outputs[2] + loss
 
             if args.n_gpu > 1:
                 loss = loss.mean()  # mean() to average on multi-gpu parallel (not distributed) training
@@ -221,6 +226,9 @@ def train(args, train_dataset, model, tokenizer):
 
 
 def evaluate(args, model, tokenizer, prefix="", write_pred=True):
+    r"""
+    Evaluate the model
+    """
     dataset, examples, features = load_and_cache_examples(args, tokenizer, evaluate=True, split=args.evaluate_split)
 
     if not os.path.exists(args.output_dir) and args.local_rank in [-1, 0]:
@@ -271,7 +279,7 @@ def evaluate(args, model, tokenizer, prefix="", write_pred=True):
         for i, feature_index in enumerate(feature_indices):
             eval_feature = features[feature_index.item()]
             unique_id = int(eval_feature.unique_id)
-            if args.merge is not None:
+            if args.merge_weight is not None:
                 result = (RawResult(unique_id=unique_id,
                                     start_logits=to_list(outputs[1][i]),
                                     end_logits=to_list(outputs[2][i])),
@@ -298,7 +306,7 @@ def evaluate(args, model, tokenizer, prefix="", write_pred=True):
     output_result_file = os.path.join(args.output_dir, "qas_eval_results_{}.json".format(prefix))
     output_file = os.path.join(args.output_dir, "eval_matrix_results_{}".format(prefix))
 
-    if args.merge is not None:
+    if args.merge_weight is not None:
         returns, _ = write_tag_predictions(examples, features,
                                            [r[1] for r in all_results], 1, args.model_type, output_tag_prediction_file,
                                            output_nbest_file, write_pred=False)
@@ -323,6 +331,7 @@ def evaluate(args, model, tokenizer, prefix="", write_pred=True):
 
     # Evaluate with the official SQuAD script
     evaluate_options = EVAL_OPTS(data_file=args.predict_file,
+                                 root_dir=args.root_dir,
                                  pred_file=output_prediction_file,
                                  tag_pred_file=output_tag_prediction_file,
                                  result_file=output_result_file if write_pred else None,
@@ -332,6 +341,9 @@ def evaluate(args, model, tokenizer, prefix="", write_pred=True):
 
 
 def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
+    r"""
+    Load and process the raw data.
+    """
     if args.local_rank not in [-1, 0] and not evaluate:
         torch.distributed.barrier()  # Make sure only the first process in distributed training process the dataset,
         # and the others will use the cache
@@ -410,7 +422,7 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
         # and the others will use the cache
 
     if args.separate_read is not None and not evaluate:
-        dataset = SubDataset(examples, evaluate, total, cached_features_file, args)
+        dataset = PiecedDataset(examples, evaluate, total, cached_features_file, args)
         return dataset
 
     # Convert to Tensors and build dataset
@@ -439,7 +451,7 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, split='train'):
                                mask_dir=os.path.dirname(input_file), direction=args.direction)
     else:
         all_answer_tid = torch.tensor([f.answer_tid for f in features], dtype=torch.long)
-        if args.merge is not None:
+        if args.merge_weight is not None:
             all_start_positions = torch.tensor([f.start_position for f in features], dtype=torch.long)
             all_end_positions = torch.tensor([f.end_position for f in features], dtype=torch.long)
         else:
@@ -564,20 +576,32 @@ def main():
     parser.add_argument('--server_port', type=str, default='', help="Can be used for distant debugging.")
 
     # added parameters
-    parser.add_argument('--num_node_block', type=int, default=3)
     parser.add_argument('--max_tag_length', default=512, type=int,
                         help="The maximum total tag length after the HTML based pooling. "
-                             "Longer than this will cause error.")
-
-    parser.add_argument('--separate_read', default=None, type=int)
-    parser.add_argument('--evaluate_split', type=str, default='dev', choices=['dev', 'test', 'train'])
-    parser.add_argument('--provided_tag_pred', type=str, default=None)
-    parser.add_argument('--mask_method', type=int, default=1,
-                        help='how the GAT implement: 0-DOM+SPA; 1-SPA; 2-DOM; 3-DOM-')
-
-    parser.add_argument('--direction', default='b', choices=['b', 'v', 'h'])
+                             "Violation will cause error.")
+    parser.add_argument('--separate_read', default=None, type=int,
+                        help='if not none, shuffle and split the dataset into corresponding number of pieces.')
     parser.add_argument('--load_epoch', action='store_true')
-    parser.add_argument('--merge', default=None, type=float)
+
+    parser.add_argument('--mask_method', type=int, default=0,
+                        help='How the GAT implement. 0: DOM+NPR; 1: NPR; 2: DOM; 3: Origin DOM.')
+    parser.add_argument('--direction', default='B', choices=['V', 'H', 'B'],
+                        help='The relations used in the NPR graph. V: only vertical relations (up & down); '
+                             'H: only horizontal relations (left & right); B: both vertical and horizontal relations')
+
+    parser.add_argument('--num_node_block', type=int, default=3,
+                        help='The number of GAT layers of the Struct Encoder')
+    parser.add_argument('--merge_weight', default=None, type=float,
+                        help='If not none, share the parameters of Content Encoder and the model used for answer '
+                             'refining stage and jointly train the models with the two losses and the specified weight '
+                             'between them.')
+
+    parser.add_argument('--evaluate_split', type=str, default='dev', choices=['dev', 'test', 'train'],
+                        help='The part of dataset used for evaluation')
+    parser.add_argument('--provided_tag_pred', type=str, default=None,
+                        help='In the answer refining stage, the file that contain the answer tag predictions generated '
+                             'in the node locating stage.')
+
     args = parser.parse_args()
 
     if os.path.exists(args.output_dir) and os.listdir(
@@ -701,7 +725,9 @@ def main():
         else:
             if args.eval_all_checkpoints:
                 checkpoints = list(
-                    os.path.dirname(c) for c in sorted(glob.glob(args.output_dir + '/**/' + WEIGHTS_NAME, recursive=True)))
+                    os.path.dirname(c) for c in sorted(glob.glob(args.output_dir + '/**/' + WEIGHTS_NAME,
+                                                                 recursive=True))
+                )
                 logging.getLogger("transformers.modeling_utils").setLevel(logging.WARN)  # Reduce model loading logs
             else:
                 checkpoints = [args.output_dir]

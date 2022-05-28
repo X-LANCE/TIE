@@ -98,7 +98,7 @@ class TIEConfig(PretrainedConfig):
             self.mask_method = args.mask_method
             self.direction = args.direction
             self.name_or_path = args.model_name_or_path
-            self.merge = args.merge is not None
+            self.merge = args.merge_weight is not None
 
 
 class HTMLBasedPooling(nn.Module):
@@ -286,5 +286,4 @@ class TIE(BertPreTrainedModel):
             loss = loss_fct(tag_logits, answer_tid)
             outputs = (loss,) + outputs
 
-        return outputs
-        # (loss), tag_logits/probs, (total_loss), (start_logits), (end_logits), (hidden_states), (attentions)
+        return outputs  # (loss), tag_logits, (total_loss), (start_logits), (end_logits), (hidden_states), (attentions)

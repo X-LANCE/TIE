@@ -11,24 +11,37 @@ from bs4 import BeautifulSoup
 
 
 class EVAL_OPTS:
-    def __init__(self, data_file, pred_file, tag_pred_file, result_file='', out_file="",  verbose=False):
+    r"""
+    The options which the matrix evaluation process needs.
+
+    Arguments:
+        data_file (str): the SQuAD-style json file of the dataset in evaluation.
+        root_dir (str): the root directory of the raw WebSRC dataset, which contains the HTML files.
+        pred_file (str): the prediction file which contain the best predicted answer text of each question from the
+                         model.
+        tag_pred_file (str): the prediction file which contain the best predicted answer tag id of each question from
+                             the model.
+        result_file (str): the file to write down the matrix evaluation results of each question.
+        out_file (str): the file to write down the final matrix evaluation results of the whole dataset.
+    """
+    def __init__(self, data_file, root_dir, pred_file, tag_pred_file, result_file='', out_file=""):
         self.data_file = data_file
+        self.root_dir = root_dir
         self.pred_file = pred_file
         self.tag_pred_file = tag_pred_file
         self.result_file = result_file
         self.out_file = out_file
-        self.verbose = verbose
 
 
 def parse_args():
     parser = argparse.ArgumentParser('Official evaluation script for SQuAD version 2.0.')
     parser.add_argument('data_file', metavar='data.json', help='Input data JSON file.')
+    parser.add_argument('root_dir', metavar='./data', help='The root directory of the raw WebSRC dataset')
     parser.add_argument('pred_file', metavar='pred.json', help='Model predictions.')
     parser.add_argument('tag_pred_file', metavar='tag_pred.json', help='Model predictions.')
     parser.add_argument('--result-file', '-r', metavar='qas_eval.json')
     parser.add_argument('--out-file', '-o', metavar='eval.json',
                         help='Write accuracy metrics to file (default is stdout).')
-    parser.add_argument('--verbose', '-v', action='store_true')
     if len(sys.argv) == 1:
         parser.print_help()
         sys.exit(1)
@@ -36,6 +49,9 @@ def parse_args():
 
 
 def make_pages_list(dataset):
+    r"""
+    Record all the pages which appears in the dataset and return the list.
+    """
     pages_list = []
     last_page = None
     for domain in dataset:
@@ -48,22 +64,15 @@ def make_pages_list(dataset):
 
 
 def make_qid_to_has_ans(dataset):
+    r"""
+    Pick all the questions which has answer in the dataset and return the list.
+    """
     qid_to_has_ans = {}
     for domain in dataset:
         for w in domain['websites']:
             for qa in w['qas']:
                 qid_to_has_ans[qa['id']] = bool(qa['answers'])
     return qid_to_has_ans
-
-
-def generate_qa_list_for_types(dataset, t) -> list:
-    qa_list_for_type = []
-    for domain in dataset:
-        for w in domain['websites']:
-            for qa in w['qas']:
-                if qa['type'] == t:
-                    qa_list_for_type.append(qa['id'])
-    return qa_list_for_type
 
 
 def normalize_answer(s):
@@ -87,16 +96,25 @@ def normalize_answer(s):
 
 
 def get_tokens(s):
+    r"""
+    Get the word list in the input.
+    """
     if not s:
         return []
     return normalize_answer(s).split()
 
 
-def compute_exact(a_gold, a_pred):
+def compute_exact(a_gold: str, a_pred: str):
+    r"""
+    Calculate the exact match.
+    """
     return int(normalize_answer(a_gold) == normalize_answer(a_pred))
 
 
-def compute_f1(a_gold, a_pred):
+def compute_f1(a_gold: str, a_pred: str):
+    r"""
+    Calculate the f1 score.
+    """
     gold_toks = get_tokens(a_gold)
     pred_toks = get_tokens(a_pred)
     common = collections.Counter(gold_toks) & collections.Counter(pred_toks)
@@ -112,7 +130,22 @@ def compute_f1(a_gold, a_pred):
     return f1
 
 
-def compute_coin(f, t_gold, addition, t_pred, output_exact=False):
+def compute_pos(f: str, t_gold: int, addition: int, t_pred: int, output_exact: bool = False):
+    r"""
+    Calculate the POS score.
+
+    Arguments:
+        f (str): the path for html file on which the question is based.
+        t_gold (int): the gold answer tag id provided by the dataset (the value correspond to the key element_id).
+        addition (int): the addition information used for yes/no question provided by the dataset (the value
+                        corresponding to the key answer_start). For answer "yes" the addition is 1 and for answer
+                        "no" the addition is 0
+        t_pred (int): the tag ids of the tags corresponding each word in the predicted answer.
+        output_exact (bool): if True, the exact match score of the tag predictions will be calculated.
+    Returns:
+        optional(float): the exact match score of the tag predictions.
+        float: the POS score.
+    """
     h = BeautifulSoup(open(f))
     p_gold, e_gold = set(), h.find(tid=t_gold)
     if e_gold is None:
@@ -147,13 +180,24 @@ def compute_coin(f, t_gold, addition, t_pred, output_exact=False):
             return len(p_gold & p_pred) / len(p_gold | p_pred)
 
 
-def get_raw_scores(dataset, preds, tag_preds, data_dir):
+def get_raw_scores(dataset, preds, tag_preds, root_dir):
+    r"""
+    Calculate all the three matrix (exact match, f1, POS) for each question.
+
+    Arguments:
+        dataset (dict): the dataset in use.
+        preds (dict): the answer text prediction for each question in the dataset.
+        tag_preds (dict): the answer tags prediction for each question in the dataset.
+        root_dir (str): the base directory for the html files.
+    Returns:
+        tuple(dict, dict, dict): exact match, f1, pos scores for each question.
+    """
     if preds is None:
         exact_scores = {}
-        coin_scores = {}
+        pos_scores = {}
         for websites in dataset:
             for w in websites['websites']:
-                f = os.path.join(data_dir, websites['domain'], w['page_id'][0:2], 'processed_data',
+                f = os.path.join(root_dir, websites['domain'], w['page_id'][0:2], 'processed_data',
                                  w['page_id'] + '.html')
                 for qa in w['qas']:
                     qid = qa['id']
@@ -164,16 +208,16 @@ def get_raw_scores(dataset, preds, tag_preds, data_dir):
                         continue
                     t_pred = tag_preds[qid]
                     # Take max over all gold answers
-                    exact_scores[qid], coin_scores[qid] = max(compute_coin(f, t, a, t_pred, output_exact=True)
-                                                              for t, a in zip(gold_tag_answers,
-                                                                              additional_tag_information))
-        return exact_scores, None, coin_scores
+                    exact_scores[qid], pos_scores[qid] = max(compute_pos(f, t, a, t_pred, output_exact=True)
+                                                             for t, a in zip(gold_tag_answers,
+                                                                             additional_tag_information))
+        return exact_scores, None, pos_scores
     exact_scores = {}
     f1_scores = {}
-    coin_scores = {}
+    pos_scores = {}
     for websites in dataset:
         for w in websites['websites']:
-            f = os.path.join(data_dir, websites['domain'], w['page_id'][0:2], 'processed_data',
+            f = os.path.join(root_dir, websites['domain'], w['page_id'][0:2], 'processed_data',
                              w['page_id'] + '.html')
             for qa in w['qas']:
                 qid = qa['id']
@@ -191,18 +235,21 @@ def get_raw_scores(dataset, preds, tag_preds, data_dir):
                 # Take max over all gold answers
                 exact_scores[qid] = max(compute_exact(a, a_pred) for a in gold_answers)
                 f1_scores[qid] = max(compute_f1(a, a_pred) for a in gold_answers)
-                coin_scores[qid] = max(compute_coin(f, t, a, t_pred)
-                                       for t, a in zip(gold_tag_answers, additional_tag_information))
-    return exact_scores, f1_scores, coin_scores
+                pos_scores[qid] = max(compute_pos(f, t, a, t_pred)
+                                      for t, a in zip(gold_tag_answers, additional_tag_information))
+    return exact_scores, f1_scores, pos_scores
 
 
-def make_eval_dict(exact_scores, f1_scores, coin_scores, qid_list=None):
+def make_eval_dict(exact_scores, f1_scores, pos_scores, qid_list=None):
+    r"""
+    Make the dictionary to show the evaluation results.
+    """
     if qid_list is None:
         total = len(exact_scores)
         return collections.OrderedDict([
             ('exact', 100.0 * sum(exact_scores.values()) / total),
             ('f1', 100.0 * sum(f1_scores.values()) / total if f1_scores is not None else 'N/A'),
-            ('coin', 100.0 * sum(coin_scores.values()) / total),
+            ('pos', 100.0 * sum(pos_scores.values()) / total),
             ('total', total),
         ])
     else:
@@ -211,13 +258,13 @@ def make_eval_dict(exact_scores, f1_scores, coin_scores, qid_list=None):
             return collections.OrderedDict([
                 ('exact', 0),
                 ('f1', 0 if f1_scores is not None else 'N/A'),
-                ('coin', 0),
+                ('pos', 0),
                 ('total', 0),
             ])
         return collections.OrderedDict([
             ('exact', 100.0 * sum(exact_scores[k] for k in qid_list) / total),
-            ('f1', 100.0 * sum(f1_scores[k] for k in qid_list) / total  if f1_scores is not None else 'N/A'),
-            ('coin', 100.0 * sum(coin_scores[k] for k in qid_list) / total),
+            ('f1', 100.0 * sum(f1_scores[k] for k in qid_list) / total if f1_scores is not None else 'N/A'),
+            ('pos', 100.0 * sum(pos_scores[k] for k in qid_list) / total),
             ('total', total),
         ])
 
@@ -227,46 +274,45 @@ def merge_eval(main_eval, new_eval, prefix):
         main_eval['%s_%s' % (prefix, k)] = new_eval[k]
 
 
-def main(OPTS):
-    data_dir = os.path.dirname(OPTS.data_file)
-    with open(OPTS.data_file) as f:
+def main(opts):
+    with open(opts.data_file) as f:
         dataset_json = json.load(f)
         dataset = dataset_json['data']
-    if isinstance(OPTS.pred_file, str):
-        with open(OPTS.pred_file) as f:
+    if isinstance(opts.pred_file, str):
+        with open(opts.pred_file) as f:
             preds = json.load(f)
     else:
-        preds = OPTS.pred_file
-    if isinstance(OPTS.tag_pred_file, str):
-        with open(OPTS.tag_pred_file) as f:
+        preds = opts.pred_file
+    if isinstance(opts.tag_pred_file, str):
+        with open(opts.tag_pred_file) as f:
             tag_preds = json.load(f)
     else:
-        tag_preds = OPTS.tag_pred_file
+        tag_preds = opts.tag_pred_file
     qid_to_has_ans = make_qid_to_has_ans(dataset)  # maps qid to True/False
     has_ans_qids = [k for k, v in qid_to_has_ans.items() if v]
     no_ans_qids = [k for k, v in qid_to_has_ans.items() if not v]
-    exact, f1, coin = get_raw_scores(dataset, preds, tag_preds, data_dir)
-    out_eval = make_eval_dict(exact, f1, coin)
+    exact, f1, pos = get_raw_scores(dataset, preds, tag_preds, opts.root_dir)
+    out_eval = make_eval_dict(exact, f1, pos)
     if has_ans_qids:
-        has_ans_eval = make_eval_dict(exact, f1, coin, qid_list=has_ans_qids)
+        has_ans_eval = make_eval_dict(exact, f1, pos, qid_list=has_ans_qids)
         merge_eval(out_eval, has_ans_eval, 'HasAns')
     if no_ans_qids:
-        no_ans_eval = make_eval_dict(exact, f1, coin, qid_list=no_ans_qids)
+        no_ans_eval = make_eval_dict(exact, f1, pos, qid_list=no_ans_qids)
         merge_eval(out_eval, no_ans_eval, 'NoAns')
     print(json.dumps(out_eval, indent=2))
     pages_list, write_eval = make_pages_list(dataset), deepcopy(out_eval)
     for p in pages_list:
         pages_ans_qids = [k for k, _ in qid_to_has_ans.items() if p in k]
-        page_eval = make_eval_dict(exact, f1, coin, qid_list=pages_ans_qids)
+        page_eval = make_eval_dict(exact, f1, pos, qid_list=pages_ans_qids)
         merge_eval(write_eval, page_eval, p)
-    if OPTS.result_file:
-        with open(OPTS.result_file, 'w') as f:
+    if opts.result_file:
+        with open(opts.result_file, 'w') as f:
             w = {}
             for k, v in qid_to_has_ans.items():
-                w[k] = {'exact': exact[k], 'f1': f1[k] if f1 is not None else 'N/A', 'coin': coin[k]}
+                w[k] = {'exact': exact[k], 'f1': f1[k] if f1 is not None else 'N/A', 'pos': pos[k]}
             json.dump(w, f)
-    if OPTS.out_file:
-        with open(OPTS.out_file, 'w') as f:
+    if opts.out_file:
+        with open(opts.out_file, 'w') as f:
             json.dump(write_eval, f)
     return out_eval
 

@@ -6,7 +6,6 @@ import math
 import collections
 from io import open
 from os import path as osp
-import random
 
 from tqdm import tqdm
 import numpy as np
@@ -20,9 +19,29 @@ logger = logging.getLogger(__name__)
 
 
 class TIEExample(object):
-    """
-    A single training/test example for the Squad dataset.
-    For examples without an answer, the start and end position are -1.
+    r"""
+    The Containers for SRC Example.
+
+    Arguments:
+        doc_tokens (list[str]): the original tokens of the HTML file before dividing into sub-tokens.
+        qas_id (str): the id of the corresponding question.
+        html_tree (BeautifulSoup): the Beautiful Soup object created from html code of the corresponding page.
+        question_text (str): the text of the corresponding question.
+        orig_answer_text (str): the answer text provided by the dataset.
+        answer_tid (int): the tid of the answer tag.
+        start_position (int): the position where the answer starts in the all_doc_tokens.
+        end_position (int): the position where the answer ends in the all_doc_tokens; NOTE that the answer tokens
+                            include the token at end_position.
+        tok_to_orig_index (list[int]): the mapping from sub-tokens (all_doc_tokens) to original tokens (doc_tokens).
+        orig_to_tok_index (list[int]): the mapping from original tokens (doc_tokens) to sub-tokens (all_doc_tokens).
+        all_doc_tokens (list[str]): the sub-tokens of the corresponding HTML file.
+        tok_to_tags_index (list[int]): the mapping from sub-tokens (all_doc_tokens) to the id of the deepest tag it
+                                       belongs to.
+        tags_to_tok_index (list[dict]): the starting and ending position (in all_doc_tokens) of each tag.
+        orig_tags (list[str]): the list of all tags in the corresponding page in the DFS order.
+        tag_depth (list): the depth of each tag in the DOM tree.
+        xpath_tag_map (dict): the tag names of the xpath of each tag.
+        xpath_subs_map (dict): the subscripts of the xpath of each tag.
     """
 
     def __init__(self,
@@ -64,19 +83,42 @@ class TIEExample(object):
     def __str__(self):
         return self.__repr__()
 
-    def __repr__(self):
-        s = ""
-        s += "qas_id: %s" % self.qas_id
-        s += ", question_text: %s" % (
-            self.question_text)
-        s += ", doc_tokens: [%s]" % (" ".join(self.doc_tokens))
-        if self.answer_tid:
-            s += ", answer_tid: %d" % self.answer_tid
-        return s
-
 
 class InputFeatures(object):
-    """A single set of features of data."""
+    r"""
+    The Container for the Features of Input Doc Spans.
+
+    Arguments:
+        unique_id (int): the unique id of the input doc span.
+        example_index (int): the index of the corresponding SRC Example of the input doc span.
+        page_id (str): the id of the corresponding web page of the question.
+        doc_span_index (int): the index of the doc span among all the doc spans which corresponding to the same SRC
+                              Example.
+        tokens (list[str]): the sub-tokens of the input sequence, including cls token, sep tokens, and the sub-tokens
+                            of the question and HTML file.
+        token_to_orig_map (dict[int, int]): the mapping from the HTML file's sub-tokens in the sequence tokens (tokens)
+                                            to the original tokens (all_tokens in the corresponding SRC Example).
+        token_is_max_context (dict[int, bool]): whether the current doc span contains the max pre- and post-context for
+                                                each HTML file's sub-tokens.
+        input_ids (list[int]): the ids of the sub-tokens in the input sequence (tokens).
+        input_mask (list[int]): use 0/1 to distinguish the input sequence from paddings.
+        segment_ids (list[int]): use 0/1 to distinguish the question and the HTML files.
+        paragraph_len (int): the length of the HTML file's sub-tokens.
+        answer_tid (int): the tid of the answer tag.
+        start_position (int): the position where the answer starts in the input sequence (0 if the answer is not fully
+                              in the input sequence).
+        end_position (int): the position where the answer ends in the input sequence; NOTE that the answer tokens
+                            include the token at end_position (0 if the answer is not fully in the input sequence).
+        token_to_tag_index (list[int]): the mapping from sub-tokens of the input sequence to the id of the deepest tag
+                                        it belongs to.
+        tag_to_token_index (list[list[int]]): the starting and ending position (in all_doc_tokens) of each tag.
+        app_tags (list[str]): the tid of all tags appearing in the feature.
+        depth (list[int]): the depth in the DOM tree of all tags in the feature.
+        base_index (int): the starting position of the content in Structure Encoder.
+        is_impossible (bool): whether the answer is fully in the doc span.
+        xpath_tags_seq (list): the tag name ids of the xpath of each tag.
+        xpath_subs_seq (list): the subscript ids of the xpath of each tag.
+    """
 
     def __init__(self,
                  unique_id,
@@ -96,7 +138,6 @@ class InputFeatures(object):
                  token_to_tag_index=None,
                  tag_to_token_index=None,
                  app_tags=None,
-                 tag_list=None,
                  depth=None,
                  base_index=None,
                  is_impossible=None,
@@ -119,7 +160,6 @@ class InputFeatures(object):
         self.token_to_tag_index = token_to_tag_index
         self.tag_to_token_index = tag_to_token_index
         self.app_tags = app_tags
-        self.tag_list = tag_list
         self.depth = depth
         self.base_index = base_index
         self.is_impossible = is_impossible
@@ -131,6 +171,9 @@ class InputFeatures(object):
 
 
 def html_escape(html):
+    r"""
+    replace the special expressions in the html file for specific punctuation.
+    """
     html = html.replace('&quot;', '"')
     html = html.replace('&amp;', '&')
     html = html.replace('&lt;', '<')
@@ -217,9 +260,24 @@ def get_xpath_and_treeid4tokens(html_code, unique_tids, max_depth):
     return xpath_tag_map, xpath_subs_map
 
 
-def read_examples(input_file, root_dir, is_training, tokenizer, base_mode,
-                  max_depth=50, sample_size=None, simplify=False):
-    """Read a SQuAD json file into a list of SquadExample."""
+def read_examples(input_file, root_dir, is_training, tokenizer, base_mode, max_depth=50, simplify=False):
+    r"""
+    pre-process the data in json format into SRC Examples.
+
+    Arguments:
+        input_file (str): the inputting data file in json format.
+        root_dir (str): the root directory of the raw WebSRC dataset, which contains the HTML files.
+        is_training (bool): True if processing the training set, else False.
+        tokenizer (Tokenizer): the tokenizer for PLM in use.
+        base_mode (str): the name of the base model of Content Encoder.
+        max_depth (int): the maximum depth limit used for xpath embedding generation.
+        simplify (bool): when setting to Ture, the returned Example will only contain document tokens, the id of the
+                         question-answers, the Beautiful Soup object of the html code, and the depth of all tags.
+    Returns:
+        list[SRCExamples]: the resulting SRC Examples, contained all the needed information for the feature generation
+                           process, except when the argument simplify is setting to True;
+        set[str]: all the tag names appeared in the processed dataset, e.g. <div>, <img/>, </p>, etc..
+    """
     with open(input_file, "r", encoding='utf-8') as reader:
         input_data = json.load(reader)["data"]
 
@@ -414,8 +472,7 @@ def read_examples(input_file, root_dir, is_training, tokenizer, base_mode,
                 for qa in website["qas"]:
                     qas_id = qa["id"]
                     tag_depth = calculate_depth(html_code)
-                    example = TIEExample(doc_tokens=doc_tokens, qas_id=qas_id,
-                                         html_tree=html_code, tag_depth=tag_depth)
+                    example = TIEExample(doc_tokens=doc_tokens, qas_id=qas_id, html_tree=html_code, tag_depth=tag_depth)
                     examples.append(example)
             else:
                 # Tokenize all doc tokens
@@ -509,11 +566,6 @@ def read_examples(input_file, root_dir, is_training, tokenizer, base_mode,
                     )
                     examples.append(example)
 
-    if sample_size is not None:
-        sampled_index = random.sample(range(0, len(examples)), sample_size)
-        sampled_index.sort()
-        examples = [examples[ind] for ind in sampled_index]
-
     return examples, all_tag_list
 
 
@@ -523,7 +575,34 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length, max_tag_le
                                  sequence_a_segment_id=0, sequence_b_segment_id=1,
                                  cls_token_segment_id=0, pad_token_segment_id=0,
                                  max_depth=50):
-    """Loads a data file into a list of `InputBatch`s."""
+    r"""
+    Converting the SRC Examples further into the features for all the input doc spans.
+
+    Arguments:
+        examples (list[SRCExample]): the list of SRC Examples to process.
+        tokenizer (Tokenizer): the tokenizer for PLM in use.
+        max_seq_length (int): the max length of the total sub-token sequence, including the question, cls token, sep
+                              tokens, and contents; if the length of the input is bigger than max_seq_length, the input
+                              will be cut into several doc spans.
+        max_tag_length (ing): the max length of the total tag sequence, including the question, cle token, sep tokens,
+                              and the html tags corresponding to the content; if the length of the input is bigger than
+                              max_tag_length, an error will occur.
+        doc_stride (int): the stride length when the input is cut into several doc spans.
+        max_query_length (int): the max length of the sub-token sequence of the questions; the question will be truncate
+                                if it is longer than max_query_length.
+        is_training (bool): True if processing the training set, else False.
+        cls_token (str): the cls token in use, default is '[CLS]'.
+        sep_token (str): the sep token in use, default is '[SEP]'.
+        pad_token (int): the id of the padding token in use when the total sub-token length is smaller that
+                         max_seq_length, default is 0 which corresponding to the '[PAD]' token.
+        sequence_a_segment_id (int): the segment id for the first sequence (the question), default is 0.
+        sequence_b_segment_id (int): the segment id for the second sequence (the html file), default is 1.
+        cls_token_segment_id (int): the segment id for the cls token, default is 0.
+        pad_token_segment_id (int): the segment id for the padding tokens, default is 0.
+        max_depth (int): the maximum depth limit used for xpath embedding generation.
+    Returns:
+        list[InputFeatures]: the resulting input features for all the input doc spans
+    """
 
     unique_id = 1000000000
     features = []
@@ -578,7 +657,6 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length, max_tag_le
             tag_to_token_index = []
             token_to_tag_index = []
             depth = []
-            tag_list = []
 
             # CLS
             tokens.append(cls_token)
@@ -586,13 +664,11 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length, max_tag_le
             tag_to_token_index.append([0, 0])
             token_to_tag_index.append(-1)
             depth.append(0)
-            tag_list.append(-1)
 
             # Query
             for i in range(len(query_tokens)):
                 tag_to_token_index.append([len(tokens) + i, len(tokens) + i])
                 token_to_tag_index.append(-1)
-                tag_list.append(-1)
             tokens += query_tokens
             segment_ids += [sequence_a_segment_id] * len(query_tokens)
             depth += [0] * len(query_tokens)
@@ -603,7 +679,6 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length, max_tag_le
             tag_to_token_index.append([len(tokens) - 1, len(tokens) - 1])
             token_to_tag_index.append(-1)
             depth.append(0)
-            tag_list.append(-1)
 
             # Paragraph
             app_tags = []
@@ -621,7 +696,6 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length, max_tag_le
                     end = min(end, doc_span.start + doc_span.length - 1) - doc_span.start + len(tokens)
                     tag_to_token_index.append([start, end])
                     app_tags.append(i)
-                    tag_list.append(i)
             for ind in app_tags:
                 depth.append(example.tag_depth[ind])
             if len(app_tags) > max_tag_length - len(query_tokens) - 3:
@@ -643,7 +717,6 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length, max_tag_le
             tag_to_token_index.append([len(tokens) - 1, len(tokens) - 1])
             token_to_tag_index.append(-1)
             depth.append(0)
-            tag_list.append(-1)
 
             input_ids = tokenizer.convert_tokens_to_ids(tokens)
 
@@ -659,14 +732,12 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length, max_tag_le
                 token_to_tag_index.append(-1)
             while len(depth) < max_tag_length:
                 depth.append(0)
-                tag_list.append(-1)
 
             assert len(input_ids) == max_seq_length
             assert len(input_mask) == max_seq_length
             assert len(segment_ids) == max_seq_length
             assert len(token_to_tag_index) == max_seq_length
             assert len(depth) == max_tag_length
-            assert len(tag_list) == max_tag_length
 
             span_is_impossible = False
             answer_tid = None
@@ -715,7 +786,6 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length, max_tag_le
                     token_to_tag_index=token_to_tag_index,
                     tag_to_token_index=tag_to_token_index,
                     app_tags=app_tags,
-                    tag_list=tag_list,
                     depth=depth,
                     base_index=base,
                     is_impossible=span_is_impossible,
@@ -729,30 +799,6 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length, max_tag_le
 
 def _improve_answer_span(doc_tokens, input_start, input_end, tokenizer,
                          orig_answer_text):
-    """Returns tokenized answer spans that better match the annotated answer."""
-
-    # The SQuAD annotations are character based. We first project them to
-    # whitespace-tokenized words. But then after WordPiece tokenization, we can
-    # often find a "better match". For example:
-    #
-    #   Question: What year was John Smith born?
-    #   Context: The leader was John Smith (1895-1943).
-    #   Answer: 1895
-    #
-    # The original whitespace-tokenized answer will be "(1895-1943).". However
-    # after tokenization, our tokens will be "( 1895 - 1943 ) .". So we can match
-    # the exact answer, 1895.
-    #
-    # However, this is not always possible. Consider the following:
-    #
-    #   Question: What country is the top exporter of electornics?
-    #   Context: The Japanese electronics industry is the lagest in the world.
-    #   Answer: Japan
-    #
-    # In this case, the annotator chose "Japan" as a character sub-span of
-    # the word "Japanese". Since our WordPiece tokenizer does not split
-    # "Japanese", we just use "Japanese" as the annotation. This is fairly rare
-    # in SQuAD, but does happen.
     tok_answer_text = " ".join(tokenizer.tokenize(orig_answer_text))
 
     for new_start in range(input_start, input_end + 1):
@@ -765,24 +811,6 @@ def _improve_answer_span(doc_tokens, input_start, input_end, tokenizer,
 
 
 def _check_is_max_context(doc_spans, cur_span_index, position):
-    """Check if this is the 'max context' doc span for the token."""
-
-    # Because of the sliding window approach taken to scoring documents, a single
-    # token can appear in multiple documents. E.g.
-    #  Doc: the man went to the store and bought a gallon of milk
-    #  Span A: the man went to the
-    #  Span B: to the store and bought
-    #  Span C: and bought a gallon of
-    #  ...
-    #
-    # Now the word 'bought' will have two scores from spans B and C. We only
-    # want to consider the score with "maximum context", which we define as
-    # the *minimum* of its left and right context (the *sum* of left and
-    # right context will always be the same, of course).
-    #
-    # In the example the maximum context for 'bought' would be span C since
-    # it has 1 left context and 3 right context, while span B has 4 left context
-    # and 0 right context.
     best_score = None
     best_span_index = None
     for (span_index, doc_span) in enumerate(doc_spans):
@@ -806,6 +834,25 @@ RawTagResult = collections.namedtuple("RawResult", ["unique_id", "tag_logits"])
 
 def write_tag_predictions(all_examples, all_features, all_results, n_best_tag_size, model_name,
                           output_tag_prediction_file, output_nbest_file, write_pred):
+    r"""
+    Compute and write down the final answer tag prediction results.
+
+    Arguments:
+        all_examples (list[SRCExample]): all the SRC Example of the dataset; note that we only need it to provide the
+                                         mapping from example index to the question-answers id and the original tag
+                                         list.
+        all_features (list[InputFeatures]): all the features for the input doc spans.
+        all_results (list[RawResult]): all the results from the models.
+        n_best_tag_size (int): the number of the n best buffer and the final n best result saved.
+        model_name (str): the name of the model used for Content Encoder.
+        output_tag_prediction_file (str): the file which the best answer tag predictions will be written to.
+        output_nbest_file (str): the file which the n best answer tag predictions including text, tag, and probabilities
+                                 will be written to.
+        write_pred (bool): whether to write the predictions to the disk.
+    Returns:
+        dict: the n best answer prediction results.
+        dict: the best answer tag prediction results.
+    """
     logger.info("Writing tag predictions to: %s" % output_tag_prediction_file)
 
     example_index_to_features = collections.defaultdict(list)
@@ -913,6 +960,31 @@ def write_predictions_provided_tag(all_examples, all_features, all_results, n_be
                                    do_lower_case, output_prediction_file, input_tag_prediction_file,
                                    output_refined_tag_prediction_file, output_nbest_file, verbose_logging,
                                    write_pred):
+    r"""
+    Providing the n best answer tag predictions, compute and write down the final answer span prediction results,
+    including the n best results.
+
+    Arguments:
+        all_examples (list[SRCExample]): all the SRC Example of the dataset; note that we only need it to provide the
+                                         mapping from example index to the question-answers id.
+        all_features (list[InputFeatures]): all the features for the input doc spans.
+        all_results (list[RawResult]): all the results from the models.
+        n_best_size (int): the number of the n best buffer and the final n best result saved.
+        max_answer_length (int): constrain the model to predict the answer no longer than it.
+        do_lower_case (bool): whether the model distinguish upper and lower case of the letters.
+        output_prediction_file (str): the file which the best answer text predictions will be written to.
+        input_tag_prediction_file (str/dict): the file which the n best answer tag predictions has been written to, or
+                                              the n best answer tag prediction results.
+        output_refined_tag_prediction_file (str): the file which the refined best answer tag predictions will be written
+                                                  to.
+        output_nbest_file (str): the file which the n best answer predictions including text, tag, and probabilities
+                                 will be written to.
+        verbose_logging (bool): if true, all the warnings related to data processing will be printed.
+        write_pred (bool): whether to write the predictions to the disk.
+    Return:
+        dict: the best answer span prediction results.
+        dict: the refined best answer tag prediction results.
+    """
     logger.info("Writing predictions to: %s" % output_prediction_file)
     logger.info("Writing nbest to: %s" % output_nbest_file)
 
@@ -1085,33 +1157,6 @@ def write_predictions_provided_tag(all_examples, all_features, all_results, n_be
 
 
 def get_final_text(pred_text, orig_text, do_lower_case, verbose_logging=False):
-    """Project the tokenized prediction back to the original text."""
-
-    # When we created the data, we kept track of the alignment between original
-    # (whitespace tokenized) tokens and our WordPiece tokenized tokens. So
-    # now `orig_text` contains the span of our original text corresponding to the
-    # span that we predicted.
-    #
-    # However, `orig_text` may contain extra characters that we don't want in
-    # our prediction.
-    #
-    # For example, let's say:
-    #   pred_text = steve smith
-    #   orig_text = Steve Smith's
-    #
-    # We don't want to return `orig_text` because it contains the extra "'s".
-    #
-    # We don't want to return `pred_text` because it's already been normalized
-    # (the SQuAD eval script also does punctuation stripping/lower casing but
-    # our tokenizer does additional normalization like stripping accent
-    # characters).
-    #
-    # What we really want to return is "Steve Smith".
-    #
-    # Therefore, we have to apply a semi-complicated alignment heuristic between
-    # `pred_text` and `orig_text` to get a character-to-character alignment. This
-    # can fail in certain cases in which case we just return `orig_text`.
-
     def _strip_spaces(text):
         ns_chars = []
         ns_to_s_map = collections.OrderedDict()
@@ -1193,7 +1238,7 @@ def _get_best_indexes(logits, n_best_size):
 
 
 def _get_best_tags(logits, n_best_size, possible_values):
-    """Get the n-best logits from a list."""
+    """Get the n-best logits from a list with exclusions."""
     index_and_score = sorted(enumerate(logits), key=lambda x: x[1], reverse=True)
 
     best_indexes = []
@@ -1229,7 +1274,18 @@ def _compute_softmax(scores):
     return probs
 
 
-def form_tree_mask(app, tree, accelerate=True):
+def form_dom_mask(app, tree, accelerate=True):
+    r"""
+    Generate DOM mask
+
+    Arguments:
+        app (list): the tags which appears in the feature.
+        tree (BeautifulSoup): the Beautiful Soup object of the web page.
+        accelerate (bool): whether to use the accelerated DOM tree (if true) or the original DOM tree (if false).
+    Returns:
+        numpy.array: the generated DOM mask.
+        numpy.array: the directed parent-child relation mask.
+    """
     def _unit(node):
         for ch in node.contents:
             if type(ch) != bs4.element.Tag:
@@ -1253,8 +1309,8 @@ def form_tree_mask(app, tree, accelerate=True):
             path.pop()
 
     path = []
-    children = np.zeros((len(app), len(app)), dtype=np.int)
     adj = np.zeros((len(app), len(app)), dtype=np.int)
+    children = np.zeros((len(app), len(app)), dtype=np.int)
     ind = np.diag_indices_from(adj)
     adj[0] = 1
     adj[:, 0] = 1
@@ -1263,7 +1319,17 @@ def form_tree_mask(app, tree, accelerate=True):
     return adj, children
 
 
-def form_spatial_mask(app, rel, direction='b'):
+def form_npr_mask(app, rel, direction='B'):
+    r"""
+    Generate NPR mask
+
+    Arguments:
+        app (list): the tags which appears in the feature.
+        rel (dict{str: dict}): the pre-generated information for NPR mask generation.
+        direction (str): the relations used in the NPR graph.
+    Returns:
+        numpy.array: the generated NPR mask.
+    """
     def _form_direction_mask(rel, d):
         mask = np.zeros((len(app), len(app)), dtype=np.int)
         reverse_mask = np.zeros((len(app), len(app)), dtype=np.int)
@@ -1283,15 +1349,15 @@ def form_spatial_mask(app, rel, direction='b'):
                 reverse_mask[ter, curr] = 1
         return mask, reverse_mask
     o = []
-    if direction in ['b', 'h']:
-        r, rr = _form_direction_mask(rel, 'rw')
-        l, rl = _form_direction_mask(rel, 'lw')
+    if direction in ['B', 'H']:
+        l, rl = _form_direction_mask(rel, 'left')
+        r, rr = _form_direction_mask(rel, 'right')
         l[rr == 1] = 1
         r[rl == 1] = 1
         o += [r, l]
-    if direction in ['b', 'v']:
-        u, ru = _form_direction_mask(rel, 'uw')
-        d, rd = _form_direction_mask(rel, 'dw')
+    if direction in ['B', 'V']:
+        u, ru = _form_direction_mask(rel, 'up')
+        d, rd = _form_direction_mask(rel, 'down')
         u[rd == 1] = 1
         d[ru == 1] = 1
         o += [u, d]

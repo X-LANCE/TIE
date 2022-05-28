@@ -5,7 +5,7 @@ import torch
 import numpy as np
 from torch.utils.data import Dataset
 
-from utils import form_tree_mask, form_spatial_mask
+from utils import form_dom_mask, form_npr_mask
 
 
 # noinspection PyUnresolvedReferences
@@ -30,7 +30,16 @@ class _BaseDataset(Dataset):
         return
 
 
-class SubDataset(_BaseDataset):
+class PiecedDataset(_BaseDataset):
+    r"""
+    Dataset which is stored into multiple pieced.
+
+    Arguments:
+        examples (list[TIEExample]): the list of SRC Examples.
+        evaluate (bool): whether the dataset is for evaluating.
+        total (int): the total number of input features.
+        base_name (str): the name of the base model of Content Encoder.
+    """
     def __init__(self, examples, evaluate, total, base_name, args):
         self.examples = examples
         self.evaluate = evaluate
@@ -75,7 +84,7 @@ class SubDataset(_BaseDataset):
                                         mask_dir=self.spatial_mask, direction=self.args.direction)
         else:
             all_answer_tid = torch.tensor([f.answer_tid for f in features], dtype=torch.long)
-            if self.args.merge is not None:
+            if self.args.merge_weight is not None:
                 all_start_positions = torch.tensor([f.start_position for f in features], dtype=torch.long)
                 all_end_positions = torch.tensor([f.end_position for f in features], dtype=torch.long)
             else:
@@ -110,18 +119,30 @@ class StrucDataset(_BaseDataset):
 
     Arguments:
         *tensors (Tensor): tensors that have the same size of the first dimension.
+        gat_mase (tuple): the parameters needed for GAT mask generation. Including the following three (in order)
+            app_tags (list[int]): the tags which appears in the corresponding feature;
+            example_index (list[int]): the index of the example from which the corresponding feature is generated;
+            html_tree (BeautifulSoup): the Beautiful Soup object of the page corresponding to the feature.
+        shape (tuple[int]): the shape of the GAT mask.
+        base_index (list(int)): the starting position of the content in Structure Encoder of the corresponding feature.
+        tag2tok (list[list[list[int]]]): the starting and ending position of each tag of the corresponding feature.
+        training (bool): whether the dataset is used for training.
+        page_id (list[str]]): the page id used to fetch the total relation mask of each page.
+                              (format: domain_name[0:2] + page_id)
+        mask_method (int): how the GAT implement. 0: DOM+NPR; 1: NPR; 2: DOM; 3: Origin DOM.
+        mask_dir (str): the direction where the pre-generated information for NPR mask generation is stored.
+        direction (str): the relations used in the NPR graph.
     """
 
-    def __init__(self, *tensors, tag_list=None, gat_mask=None, base_index=None, tag2tok=None, shape=None, training=True,
-                 page_id=None, mask_method=1, mask_dir=None, direction=None):
+    def __init__(self, *tensors, gat_mask=None, shape=None, base_index=None, tag2tok=None, training=True,
+                 page_id=None, mask_method=0, mask_dir=None, direction=None):
         tensors = tuple(tensor for tensor in tensors if tensor is not None)
         assert all(len(tensors[0]) == len(tensor) for tensor in tensors)
         self.tensors = tensors
-        self.tag_list = tag_list
         self.gat_mask = gat_mask
+        self.shape = shape
         self.base_index = base_index
         self.tag2tok = tag2tok
-        self.shape = shape
         self.training = training
         self.page_id = page_id
         self.mask_method = mask_method
@@ -138,17 +159,17 @@ class StrucDataset(_BaseDataset):
         base = self.base_index[index]
 
         if self.mask_method < 2:
-            if self.direction == 'b':
+            if self.direction == 'B':
                 spa_mask = torch.zeros((4, self.shape[0], self.shape[0]), dtype=torch.long)
             else:
                 spa_mask = torch.zeros((2, self.shape[0], self.shape[0]), dtype=torch.long)
             spa_mask[:, :base, :base + len(app_tags) + 1] = 1
             spa_mask[:, base + len(app_tags), :base + len(app_tags) + 1] = 1
-            temp = form_spatial_mask(app_tags, self.spatial_mask[self.page_id[index]], self.direction)
+            temp = form_npr_mask(app_tags, self.spatial_mask[self.page_id[index]], self.direction)
             spa_mask[:, base:base + len(app_tags), base:base + len(app_tags)] = torch.tensor(temp)
             output.append(spa_mask)
 
-        temp = torch.tensor(form_tree_mask(app_tags, html_tree, accelerate=self.mask_method != 3))
+        temp = torch.tensor(form_dom_mask(app_tags, html_tree, accelerate=self.mask_method != 3))
         dom_mask = torch.zeros((1, self.shape[0], self.shape[0]), dtype=torch.long)
         dom_mask[:, :base, :base + len(app_tags) + 1] = 1
         dom_mask[:, base + len(app_tags), :base + len(app_tags) + 1] = 1
