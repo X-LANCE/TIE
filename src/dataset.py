@@ -12,7 +12,7 @@ from utils import form_dom_mask, form_npr_mask
 class _BaseDataset(Dataset):
     def _init_spatial_mask(self, mask_dir, method):
         if method < 2:
-            suffix = '.html.spatial.json'
+            suffix = '..html.new.spatial.json'  # TODO
         else:
             self.spatial_mask = None
             return

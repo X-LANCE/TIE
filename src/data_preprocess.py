@@ -107,7 +107,7 @@ def mask_process(args):
                         if (att_x[0] >= curr_x[0]) or (att_x[1] >= curr_x[1]):
                             add_edge(right, tuple_rect[i][0], tuple_rect[j][0])
                             add_edge(left, tuple_rect[j][0], tuple_rect[i][0])
-            with open(os.path.join(d, f.split('.')[0] + '.html' + '.new.spatial.json'), 'w') as o:
+            with open(os.path.join(d, f.split('.')[0] + '.html' + '.new.spatial.json'), 'w') as o:  # TODO
                 json.dump({'left': left, 'right': right, 'up': up, 'down': down}, o)
         print('Successfully finish dir:', d)
 # def mask_process(args):

@@ -479,7 +479,7 @@ def main():
     parser.add_argument("--root_dir", default=None, type=str, required=True,
                         help="the root directory of the raw WebSRC dataset, which contains the HTML files.")
     parser.add_argument("--model_type", default=None, type=str, required=True,
-                        help="Model type selected in the bert or electra models provided by huggingface")
+                        help="Model type selected from the models supported by huggingface, such as roberta, markuplm.")
     parser.add_argument("--model_name_or_path", default=None, type=str, required=True,
                         help="Path to pretrained model or model identifier from huggingface.co/models")
     parser.add_argument("--output_dir", default=None, type=str, required=True,
@@ -530,7 +530,7 @@ def main():
                         help="Batch size per GPU/CPU for training.")
     parser.add_argument("--per_gpu_eval_batch_size", default=8, type=int,
                         help="Batch size per GPU/CPU for evaluation.")
-    parser.add_argument("--learning_rate", default=5e-5, type=float,
+    parser.add_argument("--learning_rate", default=1e-5, type=float,
                         help="The initial learning rate for Adam.")
     parser.add_argument('--gradient_accumulation_steps', type=int, default=1,
                         help="Number of updates steps to accumulate before performing a backward/update pass.")
