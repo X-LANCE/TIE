@@ -218,7 +218,7 @@ class TIE(BertPreTrainedModel):
 
         if self.config.num_attention_heads == 12:
             if self.mask_method == 0:
-                if self.direction == 'b':
+                if self.direction == 'B':
                     spa_mask = spa_mask.repeat(1, 2, 1, 1)
                 else:
                     spa_mask = spa_mask.repeat(1, 4, 1, 1)
@@ -230,7 +230,7 @@ class TIE(BertPreTrainedModel):
                 gat_mask = dom_mask
         elif self.config.num_attention_heads == 16:
             if self.mask_method == 0:
-                if self.direction == 'b':
+                if self.direction == 'B':
                     spa_mask = spa_mask.repeat(1, 3, 1, 1)
                 else:
                     spa_mask = spa_mask.repeat(1, 6, 1, 1)

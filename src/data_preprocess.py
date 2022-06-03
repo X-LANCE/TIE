@@ -78,7 +78,7 @@ def mask_process(args):
     for d, _, fs in os.walk(args.root_dir):
         print('Start process dir:', d)
         for f in tqdm(fs):
-            if not f.endswith('.html' + '.points.json'):
+            if not f.endswith('.html.points.json'):
                 continue
             rect = json.load(open(os.path.join(d, f)))
             tuple_rect = list(rect.items())
@@ -107,61 +107,9 @@ def mask_process(args):
                         if (att_x[0] >= curr_x[0]) or (att_x[1] >= curr_x[1]):
                             add_edge(right, tuple_rect[i][0], tuple_rect[j][0])
                             add_edge(left, tuple_rect[j][0], tuple_rect[i][0])
-            with open(os.path.join(d, f.split('.')[0] + '.html' + '.new.spatial.json'), 'w') as o:  # TODO
+            with open(os.path.join(d, f.split('.')[0] + '.html.spatial.json'), 'w') as o:
                 json.dump({'left': left, 'right': right, 'up': up, 'down': down}, o)
         print('Successfully finish dir:', d)
-# def mask_process(args):
-#     r"""
-#     Generated the NPR relations between tags and store them as dicts to save disk space.
-#     """
-#     def clamp(num, left, right):
-#         if num < left:
-#             return left
-#         if num > right:
-#             return right
-#         return num
-#
-#     def add_edge(d, key, ter):
-#         if key not in d:
-#             d[key] = []
-#         d[key].append(ter)
-#
-#     print('Start mask process!!!')
-#     for d, _, fs in os.walk(args.root_dir):
-#         print('Start process dir:', d)
-#         for f in tqdm(fs):
-#             if not f.endswith('.html' + '.points.json'):
-#                 continue
-#             rect = json.load(open(os.path.join(d, f)))
-#             tuple_rect = list(rect.items())
-#             left, right, up, down = {}, {}, {}, {}
-#             for i in range(len(tuple_rect)):
-#                 curr = tuple_rect[i][1]
-#                 curr_x = (curr['x'], curr['x'] + curr['width'])
-#                 curr_y = (curr['y'], curr['y'] + curr['height'])
-#                 for j in range(len(tuple_rect)):
-#                     if i == j:
-#                         continue
-#                     att = tuple_rect[j][1]
-#                     att_x = (att['x'], att['x'] + att['width'])
-#                     att_x = (clamp(att_x[0], *curr_x), clamp(att_x[1], *curr_x))
-#                     width = att_x[1] - att_x[0]
-#                     att_y = (att['y'], att['y'] + att['height'])
-#                     att_y = (clamp(att_y[0], *curr_y), clamp(att_y[1], *curr_y))
-#                     height = att_y[1] - att_y[0]
-#                     if width / curr['width'] >= args.percentage:
-#                         if att['y'] <= curr_y[0]:
-#                             add_edge(up, tuple_rect[i][0], tuple_rect[j][0])
-#                         if att['y'] + att['height'] >= curr_y[1]:
-#                             add_edge(down, tuple_rect[i][0], tuple_rect[j][0])
-#                     if height / curr['height'] >= args.percentage:
-#                         if att['x'] <= curr_x[0]:
-#                             add_edge(left, tuple_rect[i][0], tuple_rect[j][0])
-#                         if att['x'] + att['width'] >= curr_x[1]:
-#                             add_edge(right, tuple_rect[i][0], tuple_rect[j][0])
-#             with open(os.path.join(d, f.split('.')[0] + '.' + '.html' + '.spatial.json'), 'w') as o:
-#                 json.dump({'left': left, 'right': right, 'up': up, 'down': down}, o)
-#         print('Successfully finish dir:', d)
 
 
 def main():
